@@ -53,13 +53,6 @@ const DEFAULT_OUTPUT = {
     max_retries: 99
 };
 
-const DEFAULT_EDIT_OUTPUT = {
-    ...DEFAULT_OUTPUT,
-    id: '',
-    enabled: true,
-    created_at: 0
-};
-
 const DEFAULT_LEVELS = {
     left: -60,
     right: -60,
@@ -93,11 +86,17 @@ function setNestedValue(obj, path, value) {
     const keys = path.split('.');
     let current = obj;
     for (let i = 0; i < keys.length - 1; i++) {
-        if (!Object.hasOwn(current, keys[i])) return;
+        if (!Object.hasOwn(current, keys[i])) {
+            console.warn(`setNestedValue: invalid path '${path}' - key '${keys[i]}' not found`);
+            return;
+        }
         current = current[keys[i]];
     }
     const finalKey = keys[keys.length - 1];
-    if (!Object.hasOwn(current, finalKey)) return;
+    if (!Object.hasOwn(current, finalKey)) {
+        console.warn(`setNestedValue: invalid path '${path}' - final key '${finalKey}' not found`);
+        return;
+    }
     current[finalKey] = value;
 }
 
@@ -117,10 +116,8 @@ document.addEventListener('alpine:init', () => {
             { id: 'about', label: 'About', icon: 'info' }
         ],
 
-        newOutput: { ...DEFAULT_OUTPUT },
-
-        editOutput: { ...DEFAULT_EDIT_OUTPUT },
-        editOutputDirty: false,
+        outputForm: { ...DEFAULT_OUTPUT, id: '', enabled: true },
+        outputFormDirty: false,
 
         encoder: {
             state: 'connecting',
@@ -194,6 +191,10 @@ document.addEventListener('alpine:init', () => {
             return this.encoder.state === 'running';
         },
 
+        get isEditMode() {
+            return this.outputForm.id !== '';
+        },
+
         // Lifecycle
         /**
          * Alpine.js lifecycle hook - initializes WebSocket connection.
@@ -225,11 +226,8 @@ document.addEventListener('alpine:init', () => {
                 } else if (this.view === 'settings') {
                     this.cancelSettings();
                     event.preventDefault();
-                } else if (this.view === 'add-output') {
+                } else if (this.view === 'output-form') {
                     this.showDashboard();
-                    event.preventDefault();
-                } else if (this.view === 'edit-output') {
-                    this.cancelEditOutput();
                     event.preventDefault();
                 }
                 return;
@@ -298,7 +296,9 @@ document.addEventListener('alpine:init', () => {
                 setTimeout(() => this.connectWebSocket(), WS_RECONNECT_MS);
             };
 
-            this.ws.onerror = () => this.ws.close();
+            // Note: Don't call close() here - it triggers onclose which causes reconnect.
+            // The socket will close naturally on error, triggering onclose once.
+            this.ws.onerror = () => {};
         },
 
         /**
@@ -482,7 +482,10 @@ document.addEventListener('alpine:init', () => {
 
             this.testStates[type].pending = false;
             this.testStates[type].text = msg.success ? 'Sent!' : 'Failed';
-            if (!msg.success) alert(`${type.charAt(0).toUpperCase() + type.slice(1)} test failed: ${msg.error || 'Unknown error'}`);
+            if (!msg.success) {
+                const typeName = type.charAt(0).toUpperCase() + type.slice(1);
+                this.showBanner(`${typeName} test failed: ${msg.error || 'Unknown error'}`, 'danger', false);
+            }
             setTimeout(() => { this.testStates[type].text = 'Test'; }, EMAIL_FEEDBACK_MS);
         },
 
@@ -502,8 +505,7 @@ document.addEventListener('alpine:init', () => {
         saveAndClose() {
             const viewIds = {
                 'settings': 'settings-view',
-                'add-output': 'add-output-view',
-                'edit-output': 'edit-output-view'
+                'output-form': 'output-form-view'
             };
             const viewId = viewIds[this.view] || 'settings-view';
             const saveBtn = document.querySelector(`#${viewId} .nav-btn--save`);
@@ -573,9 +575,25 @@ document.addEventListener('alpine:init', () => {
             this.saveAndClose();
         },
 
-        showAddOutput() {
-            this.newOutput = { ...DEFAULT_OUTPUT };
-            this.view = 'add-output';
+        showOutputForm(id = null) {
+            if (id) {
+                const output = this.outputs.find(o => o.id === id);
+                if (!output) return;
+                this.outputForm = {
+                    id: output.id,
+                    host: output.host,
+                    port: output.port,
+                    streamid: output.streamid || '',
+                    password: '',
+                    codec: output.codec || 'wav',
+                    max_retries: output.max_retries || 99,
+                    enabled: output.enabled !== false
+                };
+            } else {
+                this.outputForm = { ...DEFAULT_OUTPUT, id: '', enabled: true };
+            }
+            this.outputFormDirty = false;
+            this.view = 'output-form';
         },
 
         /**
@@ -587,22 +605,27 @@ document.addEventListener('alpine:init', () => {
         },
 
         // Output management
-        /**
-         * Validates and submits new output configuration.
-         * Requires host and port; other fields have defaults.
-         */
-        submitNewOutput() {
-            if (!this.newOutput.host) {
-                return;
+        submitOutputForm() {
+            if (!this.outputForm.host?.trim()) return;
+
+            const data = {
+                host: this.outputForm.host.trim(),
+                port: this.outputForm.port,
+                streamid: this.outputForm.streamid.trim() || 'studio',
+                codec: this.outputForm.codec,
+                max_retries: this.outputForm.max_retries
+            };
+
+            if (this.outputForm.password) {
+                data.password = this.outputForm.password;
             }
-            this.send('add_output', null, {
-                host: this.newOutput.host.trim(),
-                port: this.newOutput.port,
-                streamid: this.newOutput.streamid.trim() || 'studio',
-                password: this.newOutput.password,
-                codec: this.newOutput.codec,
-                max_retries: this.newOutput.max_retries
-            });
+
+            if (this.isEditMode) {
+                data.enabled = this.outputForm.enabled;
+                this.send('update_output', this.outputForm.id, data);
+            } else {
+                this.send('add_output', null, data);
+            }
             this.saveAndClose();
         },
 
@@ -619,78 +642,65 @@ document.addEventListener('alpine:init', () => {
             if (returnToDashboard) this.showDashboard();
         },
 
-        /**
-         * Opens the edit output view and populates it with existing output data.
-         * @param {string} id - ID of the output to edit
-         */
-        showEditOutput(id) {
-            const output = this.outputs.find(o => o.id === id);
-            if (!output) return;
-
-            this.editOutput = {
-                id: output.id,
-                host: output.host,
-                port: output.port,
-                streamid: output.streamid || '',
-                password: '',
-                codec: output.codec || 'wav',
-                max_retries: output.max_retries || 99,
-                enabled: output.enabled !== false,
-                created_at: output.created_at
-            };
-            this.editOutputDirty = false;
-            this.view = 'edit-output';
+        markOutputFormDirty() {
+            this.outputFormDirty = true;
         },
 
         /**
-         * Marks edit output form as dirty (modified).
+         * Computes all display data for an output in a single call.
+         * Use this method to avoid multiple getOutputStatus() calls per render.
+         *
+         * @param {Object} output - Output object with id and created_at
+         * @returns {Object} Object with stateClass, statusText, showError, and lastError
          */
-        markEditOutputDirty() {
-            this.editOutputDirty = true;
-        },
+        getOutputDisplayData(output) {
+            const status = this.outputStatuses[output.id] || {};
+            const isDeleting = this.deletingOutputs[output.id] === output.created_at;
 
-        /**
-         * Cancels edit and returns to dashboard without saving.
-         */
-        cancelEditOutput() {
-            this.editOutput = { ...DEFAULT_EDIT_OUTPUT };
-            this.editOutputDirty = false;
-            this.showDashboard();
-        },
-
-        /**
-         * Submits the edited output to the backend.
-         */
-        submitEditOutput() {
-            if (!this.editOutput.host || !this.editOutput.id) return;
-
-            const data = {
-                host: this.editOutput.host.trim(),
-                port: this.editOutput.port,
-                streamid: this.editOutput.streamid.trim() || 'studio',
-                codec: this.editOutput.codec,
-                max_retries: this.editOutput.max_retries,
-                enabled: this.editOutput.enabled,
-                created_at: this.editOutput.created_at
-            };
-
-            if (this.editOutput.password) {
-                data.password = this.editOutput.password;
+            // Handle disabled outputs first (explicit from backend)
+            if (status.disabled) {
+                return {
+                    stateClass: 'state-stopped',
+                    statusText: 'Disabled',
+                    showError: false,
+                    lastError: ''
+                };
             }
 
-            this.send('update_output', this.editOutput.id, data);
-            this.saveAndClose();
-        },
+            // Compute state class
+            let stateClass;
+            if (isDeleting) stateClass = 'state-warning';
+            else if (status.stable) stateClass = 'state-success';
+            else if (status.given_up) stateClass = 'state-danger';
+            else if (status.retry_count > 0) stateClass = 'state-warning';
+            else if (status.running) stateClass = 'state-warning';
+            else if (!this.encoderRunning) stateClass = 'state-stopped';
+            else stateClass = 'state-warning';
 
-        /**
-         * Deletes the output being edited and returns to dashboard.
-         */
-        confirmDeleteOutput() {
-            this.deleteOutput(this.editOutput.id, true);
+            // Compute status text
+            let statusText;
+            if (isDeleting) statusText = 'Deleting...';
+            else if (status.stable) statusText = 'Connected';
+            else if (status.given_up) statusText = 'Failed';
+            else if (status.retry_count > 0) statusText = `Retry ${status.retry_count}/${status.max_retries}`;
+            else if (status.running) statusText = 'Connecting...';
+            else if (!this.encoderRunning) statusText = 'Offline';
+            else statusText = 'Connecting...';
+
+            // Compute error visibility
+            const showError = !isDeleting && (status.given_up || status.retry_count > 0) && status.last_error;
+
+            return {
+                stateClass,
+                statusText,
+                showError,
+                lastError: status.last_error || ''
+            };
         },
 
         /**
          * Gets output status and deletion state.
+         * @deprecated Use getOutputDisplayData() for better performance
          *
          * @param {Object} output - Output object with id and created_at
          * @returns {Object} Object with status and isDeleting properties
@@ -705,48 +715,36 @@ document.addEventListener('alpine:init', () => {
         /**
          * Determines CSS state class for output status indicator.
          * Priority: deleting > encoder stopped > failed > retrying > connected.
+         * @deprecated Use getOutputDisplayData().stateClass for better performance
          *
          * @param {Object} output - Output configuration object
          * @returns {string} CSS class for state styling
          */
         getOutputStateClass(output) {
-            const { status, isDeleting } = this.getOutputStatus(output);
-            if (isDeleting) return 'state-warning';
-            if (status.stable) return 'state-success';
-            if (status.given_up) return 'state-danger';
-            if (status.retry_count > 0) return 'state-warning';
-            if (status.running) return 'state-warning';
-            if (!this.encoderRunning) return 'state-stopped';
-            return 'state-warning';
+            return this.getOutputDisplayData(output).stateClass;
         },
 
         /**
          * Generates human-readable status text for output.
+         * @deprecated Use getOutputDisplayData().statusText for better performance
          *
          * @param {Object} output - Output configuration object
          * @returns {string} Status text (e.g., 'Connected', 'Retry 2/5')
          */
         getOutputStatusText(output) {
-            const { status, isDeleting } = this.getOutputStatus(output);
-            if (isDeleting) return 'Deleting...';
-            if (status.stable) return 'Connected';
-            if (status.given_up) return 'Failed';
-            if (status.retry_count > 0) return `Retry ${status.retry_count}/${status.max_retries}`;
-            if (status.running) return 'Connecting...';
-            if (!this.encoderRunning) return 'Offline';
-            return 'Connecting...';
+            return this.getOutputDisplayData(output).statusText;
         },
 
         /**
          * Determines if error message should be shown for output.
          * Shows error when output has failed state with error message.
+         * @deprecated Use getOutputDisplayData().showError for better performance
          *
          * @param {Object} output - Output configuration object
          * @returns {boolean} True if error should be displayed
          */
         shouldShowError(output) {
-            const { status, isDeleting } = this.getOutputStatus(output);
-            return !isDeleting && (status.given_up || status.retry_count > 0) && status.last_error;
+            return this.getOutputDisplayData(output).showError;
         },
 
         /**
