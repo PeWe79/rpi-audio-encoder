@@ -19,22 +19,30 @@ const (
 
 const (
 	// InitialRetryDelay is the starting delay between retry attempts.
-	InitialRetryDelay = 3 * time.Second
+	InitialRetryDelay = 3000 * time.Millisecond
 	// MaxRetryDelay is the maximum delay between retry attempts.
-	MaxRetryDelay = 60 * time.Second
+	MaxRetryDelay = 60000 * time.Millisecond
 	// MaxRetries is the maximum number of retry attempts for the audio source.
 	MaxRetries = 10
 	// SuccessThreshold is the duration after which retry count resets.
-	SuccessThreshold = 30 * time.Second
+	SuccessThreshold = 30000 * time.Millisecond
 	// StableThreshold is the duration after which a connection is considered stable.
-	StableThreshold = 10 * time.Second
+	StableThreshold = 10000 * time.Millisecond
 )
 
 const (
 	// ShutdownTimeout is the duration to wait for graceful shutdown.
-	ShutdownTimeout = 3 * time.Second
+	ShutdownTimeout = 3000 * time.Millisecond
 	// PollInterval is the interval for polling process state.
 	PollInterval = 50 * time.Millisecond
+)
+
+// Audio format constants for PCM capture and encoding.
+const (
+	// SampleRate is the audio sample rate in Hz.
+	SampleRate = 48000
+	// Channels is the number of audio channels (stereo).
+	Channels = 2
 )
 
 // Output represents a single SRT output destination.
@@ -60,7 +68,7 @@ const DefaultMaxRetries = 99
 
 // OutputRestartDelay is the delay between stopping and starting an output during restart.
 // SRT connections with high latency settings need time to fully close on the server side.
-const OutputRestartDelay = 2 * time.Second
+const OutputRestartDelay = 2000 * time.Millisecond
 
 // MaxRetriesOrDefault returns the configured max retries or the default value.
 func (o *Output) MaxRetriesOrDefault() int {
@@ -87,20 +95,30 @@ var CodecPresets = map[string]CodecPreset{
 // DefaultCodec is used when an unknown codec is specified.
 const DefaultCodec = "wav"
 
-// CodecArgs returns FFmpeg codec arguments for this output's codec.
-func (o *Output) CodecArgs() []string {
-	if preset, ok := CodecPresets[o.Codec]; ok {
+// CodecArgsFor returns FFmpeg codec arguments for the given codec name.
+func CodecArgsFor(codec string) []string {
+	if preset, ok := CodecPresets[codec]; ok {
 		return preset.Args
 	}
 	return CodecPresets[DefaultCodec].Args
 }
 
-// Format returns the FFmpeg output format for this output's codec.
-func (o *Output) Format() string {
-	if preset, ok := CodecPresets[o.Codec]; ok {
+// FormatFor returns the FFmpeg output format for the given codec name.
+func FormatFor(codec string) string {
+	if preset, ok := CodecPresets[codec]; ok {
 		return preset.Format
 	}
 	return CodecPresets[DefaultCodec].Format
+}
+
+// CodecArgs returns FFmpeg codec arguments for this output's codec.
+func (o *Output) CodecArgs() []string {
+	return CodecArgsFor(o.Codec)
+}
+
+// Format returns the FFmpeg output format for this output's codec.
+func (o *Output) Format() string {
+	return FormatFor(o.Codec)
 }
 
 // OutputStatus contains runtime status for an output.
@@ -112,6 +130,76 @@ type OutputStatus struct {
 	RetryCount int    `json:"retry_count,omitzero"` // Current retry attempt
 	MaxRetries int    `json:"max_retries"`          // Maximum retry attempts
 	GivenUp    bool   `json:"given_up,omitzero"`    // Max retries exhausted
+}
+
+// RotationMode determines how recordings are split into files.
+type RotationMode string
+
+const (
+	// RotationHourly rotates recordings at system clock hour boundaries.
+	// Hourly recorders always auto-start when encoder starts.
+	RotationHourly RotationMode = "hourly"
+	// RotationOnDemand allows API-controlled start/stop with global max duration.
+	// On-demand recorders never auto-start - require explicit API call.
+	RotationOnDemand RotationMode = "ondemand"
+)
+
+// StorageMode determines where recordings are saved.
+type StorageMode string
+
+const (
+	// StorageLocal saves recordings only to local filesystem.
+	StorageLocal StorageMode = "local"
+	// StorageS3 uploads recordings only to S3.
+	StorageS3 StorageMode = "s3"
+	// StorageBoth saves locally AND uploads to S3.
+	StorageBoth StorageMode = "both"
+)
+
+// DefaultRetentionDays is the default number of days to keep recordings.
+const DefaultRetentionDays = 90
+
+// Recorder represents a recording destination configuration.
+type Recorder struct {
+	ID           string       `json:"id"`                   // Unique identifier
+	Name         string       `json:"name"`                 // Display name
+	Enabled      *bool        `json:"enabled,omitempty"`    // Whether recorder is active (nil defaults to true)
+	Codec        string       `json:"codec"`                // Audio codec (mp2, mp3, ogg, wav)
+	RotationMode RotationMode `json:"rotation_mode"`        // hourly or ondemand
+	StorageMode  StorageMode  `json:"storage_mode"`         // local, s3, or both
+	LocalPath    string       `json:"local_path,omitempty"` // Local directory for recordings (required for local/both)
+
+	// S3 configuration (required for s3/both modes)
+	S3Endpoint        string `json:"s3_endpoint,omitempty"`          // S3-compatible endpoint URL
+	S3Bucket          string `json:"s3_bucket,omitempty"`            // S3 bucket name
+	S3AccessKeyID     string `json:"s3_access_key_id,omitempty"`     // S3 access key ID
+	S3SecretAccessKey string `json:"s3_secret_access_key,omitempty"` // S3 secret access key
+	// S3 prefix auto-generated: recordings/{sanitized-name}/
+
+	RetentionDays int   `json:"retention_days,omitempty"` // Days to keep recordings (default 90)
+	CreatedAt     int64 `json:"created_at"`               // Unix timestamp of creation
+}
+
+// IsEnabled returns whether the recorder is enabled (defaults to true if not set).
+func (r *Recorder) IsEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+// CodecArgs returns FFmpeg codec arguments for this recorder's codec.
+func (r *Recorder) CodecArgs() []string {
+	return CodecArgsFor(r.Codec)
+}
+
+// Format returns the FFmpeg output format for this recorder's codec.
+func (r *Recorder) Format() string {
+	return FormatFor(r.Codec)
+}
+
+// RecorderStatus contains runtime status for a recorder.
+type RecorderStatus struct {
+	State      string `json:"state"`                // idle, recording, finalizing, error
+	DurationMs int64  `json:"duration_ms,omitzero"` // Current recording duration in milliseconds
+	Error      string `json:"error,omitempty"`      // Error message if state is error
 }
 
 // EncoderStatus contains a summary of the encoder's current operational state.
@@ -132,15 +220,15 @@ const SilenceLevelActive SilenceLevel = "active"
 
 // AudioLevels contains current audio level measurements.
 type AudioLevels struct {
-	Left            float64      `json:"left"`                      // RMS level in dB
-	Right           float64      `json:"right"`                     // RMS level in dB
-	PeakLeft        float64      `json:"peak_left"`                 // Peak level in dB
-	PeakRight       float64      `json:"peak_right"`                // Peak level in dB
-	Silence         bool         `json:"silence,omitzero"`          // True if audio below threshold
-	SilenceDuration float64      `json:"silence_duration,omitzero"` // Silence duration in seconds
-	SilenceLevel    SilenceLevel `json:"silence_level,omitzero"`    // "active" when in confirmed silence state
-	ClipLeft        int          `json:"clip_left,omitzero"`        // Clipped samples on left channel
-	ClipRight       int          `json:"clip_right,omitzero"`       // Clipped samples on right channel
+	Left              float64      `json:"left"`                         // RMS level in dB
+	Right             float64      `json:"right"`                        // RMS level in dB
+	PeakLeft          float64      `json:"peak_left"`                    // Peak level in dB
+	PeakRight         float64      `json:"peak_right"`                   // Peak level in dB
+	Silence           bool         `json:"silence,omitzero"`             // True if audio below threshold
+	SilenceDurationMs int64        `json:"silence_duration_ms,omitzero"` // Silence duration in milliseconds
+	SilenceLevel      SilenceLevel `json:"silence_level,omitzero"`       // "active" when in confirmed silence state
+	ClipLeft          int          `json:"clip_left,omitzero"`           // Clipped samples on left channel
+	ClipRight         int          `json:"clip_right,omitzero"`          // Clipped samples on right channel
 }
 
 // AudioMetrics contains audio level metrics for callback processing.
@@ -148,31 +236,34 @@ type AudioMetrics struct {
 	RMSLeft, RMSRight   float64      // RMS levels in dB
 	PeakLeft, PeakRight float64      // Peak levels in dB
 	Silence             bool         // True if audio below threshold
-	SilenceDuration     float64      // Silence duration in seconds
+	SilenceDurationMs   int64        // Silence duration in milliseconds
 	SilenceLevel        SilenceLevel // "active" when in confirmed silence state
 	ClipLeft, ClipRight int          // Clipped sample counts
 }
 
 // WSStatusResponse is sent to clients with full encoder and output status.
 type WSStatusResponse struct {
-	Type             string                  `json:"type"`              // Message type identifier
-	FFmpegAvailable  bool                    `json:"ffmpeg_available"`  // FFmpeg binary is available
-	Encoder          EncoderStatus           `json:"encoder"`           // Encoder status
-	Outputs          []Output                `json:"outputs"`           // Output configurations
-	OutputStatus     map[string]OutputStatus `json:"output_status"`     // Runtime output status
-	Devices          []AudioDevice           `json:"devices"`           // Available audio devices
-	SilenceThreshold float64                 `json:"silence_threshold"` // Silence threshold in dB
-	SilenceDuration  float64                 `json:"silence_duration"`  // Silence duration in seconds
-	SilenceRecovery  float64                 `json:"silence_recovery"`  // Recovery duration in seconds
-	SilenceWebhook   string                  `json:"silence_webhook"`   // Webhook URL for alerts
-	SilenceLogPath   string                  `json:"silence_log_path"`  // Log file path
-	EmailSMTPHost    string                  `json:"email_smtp_host"`   // SMTP server hostname
-	EmailSMTPPort    int                     `json:"email_smtp_port"`   // SMTP server port
-	EmailFromName    string                  `json:"email_from_name"`   // Sender display name
-	EmailUsername    string                  `json:"email_username"`    // SMTP username
-	EmailRecipients  string                  `json:"email_recipients"`  // Comma-separated recipients
-	Settings         WSSettings              `json:"settings"`          // Current settings
-	Version          VersionInfo             `json:"version"`           // Version information
+	Type              string                    `json:"type"`                // Message type identifier
+	FFmpegAvailable   bool                      `json:"ffmpeg_available"`    // FFmpeg binary is available
+	Encoder           EncoderStatus             `json:"encoder"`             // Encoder status
+	Outputs           []Output                  `json:"outputs"`             // Output configurations
+	OutputStatus      map[string]OutputStatus   `json:"output_status"`       // Runtime output status
+	Recorders         []Recorder                `json:"recorders"`           // Recorder configurations
+	RecorderStatuses  map[string]RecorderStatus `json:"recorder_statuses"`   // Runtime recorder status
+	RecordingAPIKey   string                    `json:"recording_api_key"`   // API key for recording control
+	Devices           []AudioDevice             `json:"devices"`             // Available audio devices
+	SilenceThreshold  float64                   `json:"silence_threshold"`   // Silence threshold in dB
+	SilenceDurationMs int64                     `json:"silence_duration_ms"` // Silence duration in milliseconds
+	SilenceRecoveryMs int64                     `json:"silence_recovery_ms"` // Recovery duration in milliseconds
+	SilenceWebhook    string                    `json:"silence_webhook"`     // Webhook URL for alerts
+	SilenceLogPath    string                    `json:"silence_log_path"`    // Log file path
+	EmailSMTPHost     string                    `json:"email_smtp_host"`     // SMTP server hostname
+	EmailSMTPPort     int                       `json:"email_smtp_port"`     // SMTP server port
+	EmailFromName     string                    `json:"email_from_name"`     // Sender display name
+	EmailUsername     string                    `json:"email_username"`      // SMTP username
+	EmailRecipients   string                    `json:"email_recipients"`    // Comma-separated recipients
+	Settings          WSSettings                `json:"settings"`            // Current settings
+	Version           VersionInfo               `json:"version"`             // Version information
 }
 
 // WSSettings contains the settings sub-object in status responses.
@@ -206,10 +297,10 @@ type WSSilenceLogResult struct {
 
 // SilenceLogEntry represents a single entry in the silence log.
 type SilenceLogEntry struct {
-	Timestamp   string  `json:"timestamp"`              // RFC3339 timestamp
-	Event       string  `json:"event"`                  // Event type (silence_start, silence_end)
-	DurationSec float64 `json:"duration_sec,omitempty"` // Silence duration in seconds
-	ThresholdDB float64 `json:"threshold_db"`           // Threshold in dB
+	Timestamp   string  `json:"timestamp"`             // RFC3339 timestamp
+	Event       string  `json:"event"`                 // Event type (silence_start, silence_end)
+	DurationMs  int64   `json:"duration_ms,omitempty"` // Silence duration in milliseconds
+	ThresholdDB float64 `json:"threshold_db"`          // Threshold in dB
 }
 
 // AudioDevice represents an available audio input device.

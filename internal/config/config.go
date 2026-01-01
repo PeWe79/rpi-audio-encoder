@@ -3,8 +3,10 @@ package config
 
 import (
 	"cmp"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,16 +20,17 @@ import (
 
 // Configuration defaults.
 const (
-	DefaultWebPort           = 8080
-	DefaultWebUsername       = "admin"
-	DefaultWebPassword       = "encoder"
-	DefaultSilenceThreshold  = -40.0
-	DefaultSilenceDuration   = 15.0
-	DefaultSilenceRecovery   = 5.0
-	DefaultEmailSMTPPort     = 587
-	DefaultStationName       = "ZuidWest FM"
-	DefaultStationColorLight = "#E6007E"
-	DefaultStationColorDark  = "#E6007E"
+	DefaultWebPort                     = 8080
+	DefaultWebUsername                 = "admin"
+	DefaultWebPassword                 = "encoder"
+	DefaultSilenceThreshold            = -40.0
+	DefaultSilenceDurationMs           = 15000 // 15 seconds in milliseconds
+	DefaultSilenceRecoveryMs           = 5000  // 5 seconds in milliseconds
+	DefaultEmailSMTPPort               = 587
+	DefaultStationName                 = "ZuidWest FM"
+	DefaultStationColorLight           = "#E6007E"
+	DefaultStationColorDark            = "#E6007E"
+	DefaultRecordingMaxDurationMinutes = 240 // 4 hours for on-demand recorders
 )
 
 // Default email from name placeholder.
@@ -54,9 +57,9 @@ type AudioConfig struct {
 
 // SilenceDetectionConfig is the silence detection configuration.
 type SilenceDetectionConfig struct {
-	ThresholdDB     float64 `json:"threshold_db,omitempty"`
-	DurationSeconds float64 `json:"duration_seconds,omitempty"`
-	RecoverySeconds float64 `json:"recovery_seconds,omitempty"`
+	ThresholdDB float64 `json:"threshold_db,omitempty"`
+	DurationMs  int64   `json:"duration_ms,omitempty"`
+	RecoveryMs  int64   `json:"recovery_ms,omitempty"`
 }
 
 // NotificationsConfig is the notification configuration.
@@ -75,13 +78,16 @@ type StationConfig struct {
 
 // Config holds all application configuration. It is safe for concurrent use.
 type Config struct {
-	FFmpegPath       string                 `json:"ffmpeg_path,omitempty"` // Path to FFmpeg binary (empty = use PATH)
-	Station          StationConfig          `json:"station"`
-	Web              WebConfig              `json:"web"`
-	Audio            AudioConfig            `json:"audio"`
-	SilenceDetection SilenceDetectionConfig `json:"silence_detection,omitempty"`
-	Notifications    NotificationsConfig    `json:"notifications,omitempty"`
-	Outputs          []types.Output         `json:"outputs"`
+	FFmpegPath                  string                 `json:"ffmpeg_path,omitempty"` // Path to FFmpeg binary (empty = use PATH)
+	Station                     StationConfig          `json:"station"`
+	Web                         WebConfig              `json:"web"`
+	Audio                       AudioConfig            `json:"audio"`
+	SilenceDetection            SilenceDetectionConfig `json:"silence_detection,omitempty"`
+	Notifications               NotificationsConfig    `json:"notifications,omitempty"`
+	RecordingAPIKey             string                 `json:"recording_api_key,omitempty"`              // Global API key for all recorders
+	RecordingMaxDurationMinutes int                    `json:"recording_max_duration_minutes,omitempty"` // Max duration for on-demand recorders (default 240)
+	Outputs                     []types.Output         `json:"outputs"`
+	Recorders                   []types.Recorder       `json:"recorders"`
 
 	mu       sync.RWMutex
 	filePath string
@@ -104,6 +110,7 @@ func New(filePath string) *Config {
 		SilenceDetection: SilenceDetectionConfig{},
 		Notifications:    NotificationsConfig{},
 		Outputs:          []types.Output{},
+		Recorders:        []types.Recorder{},
 		filePath:         filePath,
 	}
 }
@@ -178,6 +185,20 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Outputs[i].CreatedAt == 0 {
 			c.Outputs[i].CreatedAt = time.Now().UnixMilli()
+		}
+	}
+	if c.Recorders == nil {
+		c.Recorders = []types.Recorder{}
+	}
+	for i := range c.Recorders {
+		if c.Recorders[i].Codec == "" {
+			c.Recorders[i].Codec = types.DefaultCodec
+		}
+		if c.Recorders[i].RotationMode == "" {
+			c.Recorders[i].RotationMode = types.RotationHourly
+		}
+		if c.Recorders[i].CreatedAt == 0 {
+			c.Recorders[i].CreatedAt = time.Now().UnixMilli()
 		}
 	}
 }
@@ -286,6 +307,95 @@ func (c *Config) UpdateOutput(output *types.Output) error {
 	return c.saveLocked()
 }
 
+// ConfiguredRecorders returns a copy of all recorders.
+func (c *Config) ConfiguredRecorders() []types.Recorder {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return slices.Clone(c.Recorders)
+}
+
+// Recorder returns a copy of the recorder with the given ID, or nil if not found.
+func (c *Config) Recorder(id string) *types.Recorder {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for i := range c.Recorders {
+		if c.Recorders[i].ID == id {
+			recorder := c.Recorders[i]
+			return &recorder
+		}
+	}
+	return nil
+}
+
+// findRecorderIndex returns the index of the recorder with the given ID, or -1 if not found.
+func (c *Config) findRecorderIndex(id string) int {
+	for i := range c.Recorders {
+		if c.Recorders[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// AddRecorder adds a new recorder and saves the configuration.
+func (c *Config) AddRecorder(recorder *types.Recorder) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if recorder.ID == "" {
+		recorder.ID = fmt.Sprintf("recorder-%d", len(c.Recorders)+1)
+	}
+	if recorder.Codec == "" {
+		recorder.Codec = types.DefaultCodec
+	}
+	if recorder.RotationMode == "" {
+		recorder.RotationMode = types.RotationHourly
+	}
+	if recorder.StorageMode == "" {
+		recorder.StorageMode = types.StorageLocal
+	}
+	if recorder.RetentionDays == 0 {
+		recorder.RetentionDays = types.DefaultRetentionDays
+	}
+	if recorder.Enabled == nil {
+		enabled := true
+		recorder.Enabled = &enabled
+	}
+	recorder.CreatedAt = time.Now().UnixMilli()
+
+	c.Recorders = append(c.Recorders, *recorder)
+	return c.saveLocked()
+}
+
+// RemoveRecorder removes a recorder by ID and saves the configuration.
+func (c *Config) RemoveRecorder(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	i := c.findRecorderIndex(id)
+	if i == -1 {
+		return fmt.Errorf("recorder not found: %s", id)
+	}
+
+	c.Recorders = append(c.Recorders[:i], c.Recorders[i+1:]...)
+	return c.saveLocked()
+}
+
+// UpdateRecorder updates an existing recorder and saves the configuration.
+func (c *Config) UpdateRecorder(recorder *types.Recorder) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	i := c.findRecorderIndex(recorder.ID)
+	if i == -1 {
+		return fmt.Errorf("recorder not found: %s", recorder.ID)
+	}
+
+	c.Recorders[i] = *recorder
+	return c.saveLocked()
+}
+
 // AudioInput returns the configured audio input device.
 func (c *Config) AudioInput() string {
 	c.mu.RLock()
@@ -294,6 +404,7 @@ func (c *Config) AudioInput() string {
 }
 
 // GetFFmpegPath returns the configured FFmpeg binary path.
+// Note: "Get" prefix used to avoid collision with FFmpegPath field.
 func (c *Config) GetFFmpegPath() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -316,19 +427,19 @@ func (c *Config) SetSilenceThreshold(threshold float64) error {
 	return c.saveLocked()
 }
 
-// SetSilenceDuration updates the silence duration and saves the configuration.
-func (c *Config) SetSilenceDuration(seconds float64) error {
+// SetSilenceDurationMs updates the silence duration and saves the configuration.
+func (c *Config) SetSilenceDurationMs(ms int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.SilenceDetection.DurationSeconds = seconds
+	c.SilenceDetection.DurationMs = ms
 	return c.saveLocked()
 }
 
-// SetSilenceRecovery updates the silence recovery time and saves the configuration.
-func (c *Config) SetSilenceRecovery(seconds float64) error {
+// SetSilenceRecoveryMs updates the silence recovery time and saves the configuration.
+func (c *Config) SetSilenceRecoveryMs(ms int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.SilenceDetection.RecoverySeconds = seconds
+	c.SilenceDetection.RecoveryMs = ms
 	return c.saveLocked()
 }
 
@@ -387,9 +498,9 @@ type Snapshot struct {
 	AudioInput string
 
 	// Silence Detection
-	SilenceThreshold float64
-	SilenceDuration  float64
-	SilenceRecovery  float64
+	SilenceThreshold  float64
+	SilenceDurationMs int64
+	SilenceRecoveryMs int64
 
 	// Notifications
 	WebhookURL string
@@ -403,8 +514,15 @@ type Snapshot struct {
 	EmailPassword   string
 	EmailRecipients string
 
+	// Recording
+	RecordingAPIKey             string
+	RecordingMaxDurationMinutes int
+
 	// Outputs (copy)
 	Outputs []types.Output
+
+	// Recorders (copy)
+	Recorders []types.Recorder
 }
 
 // Snapshot returns a point-in-time copy of all configuration values.
@@ -430,9 +548,9 @@ func (c *Config) Snapshot() Snapshot {
 		AudioInput: c.Audio.Input,
 
 		// Silence Detection (with defaults)
-		SilenceThreshold: cmp.Or(c.SilenceDetection.ThresholdDB, DefaultSilenceThreshold),
-		SilenceDuration:  cmp.Or(c.SilenceDetection.DurationSeconds, DefaultSilenceDuration),
-		SilenceRecovery:  cmp.Or(c.SilenceDetection.RecoverySeconds, DefaultSilenceRecovery),
+		SilenceThreshold:  cmp.Or(c.SilenceDetection.ThresholdDB, DefaultSilenceThreshold),
+		SilenceDurationMs: cmp.Or(c.SilenceDetection.DurationMs, DefaultSilenceDurationMs),
+		SilenceRecoveryMs: cmp.Or(c.SilenceDetection.RecoveryMs, DefaultSilenceRecoveryMs),
 
 		// Notifications
 		WebhookURL: c.Notifications.WebhookURL,
@@ -446,8 +564,15 @@ func (c *Config) Snapshot() Snapshot {
 		EmailPassword:   c.Notifications.Email.Password,
 		EmailRecipients: c.Notifications.Email.Recipients,
 
+		// Recording
+		RecordingAPIKey:             c.RecordingAPIKey,
+		RecordingMaxDurationMinutes: cmp.Or(c.RecordingMaxDurationMinutes, DefaultRecordingMaxDurationMinutes),
+
 		// Outputs
 		Outputs: slices.Clone(c.Outputs),
+
+		// Recorders
+		Recorders: slices.Clone(c.Recorders),
 	}
 }
 
@@ -464,4 +589,35 @@ func (s *Snapshot) HasEmail() bool {
 // HasLogPath reports whether a log path is configured.
 func (s *Snapshot) HasLogPath() bool {
 	return s.LogPath != ""
+}
+
+// GetRecordingAPIKey returns the API key for recording REST endpoints.
+// Note: "Get" prefix used to avoid collision with RecordingAPIKey field.
+func (c *Config) GetRecordingAPIKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.RecordingAPIKey
+}
+
+// SetRecordingAPIKey updates the API key and saves the configuration.
+func (c *Config) SetRecordingAPIKey(key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.RecordingAPIKey = key
+	return c.saveLocked()
+}
+
+// GenerateAPIKey generates a new random 32-character alphanumeric API key.
+func GenerateAPIKey() (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	const length = 32
+	result := make([]byte, length)
+	for i := range result {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", err
+		}
+		result[i] = chars[n.Int64()]
+	}
+	return string(result), nil
 }

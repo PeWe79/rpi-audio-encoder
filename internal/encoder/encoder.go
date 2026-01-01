@@ -18,6 +18,7 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/config"
 	"github.com/oszuidwest/zwfm-encoder/internal/notify"
 	"github.com/oszuidwest/zwfm-encoder/internal/output"
+	"github.com/oszuidwest/zwfm-encoder/internal/recording"
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
@@ -36,24 +37,25 @@ var (
 
 // Encoder manages audio capture and distribution to multiple streaming outputs.
 type Encoder struct {
-	config          *config.Config
-	ffmpegPath      string
-	outputManager   *output.Manager
-	sourceCmd       *exec.Cmd
-	sourceCancel    context.CancelFunc
-	sourceStdout    io.ReadCloser
-	state           types.EncoderState
-	stopChan        chan struct{}
-	mu              sync.RWMutex
-	lastError       string
-	startTime       time.Time
-	retryCount      int
-	backoff         *util.Backoff
-	audioLevels     types.AudioLevels
-	lastKnownLevels types.AudioLevels // Cache for TryRLock fallback
-	silenceDetect   *audio.SilenceDetector
-	silenceNotifier *notify.SilenceNotifier
-	peakHolder      *audio.PeakHolder
+	config           *config.Config
+	ffmpegPath       string
+	outputManager    *output.Manager
+	recordingManager *recording.Manager
+	sourceCmd        *exec.Cmd
+	sourceCancel     context.CancelFunc
+	sourceStdout     io.ReadCloser
+	state            types.EncoderState
+	stopChan         chan struct{}
+	mu               sync.RWMutex
+	lastError        string
+	startTime        time.Time
+	retryCount       int
+	backoff          *util.Backoff
+	audioLevels      types.AudioLevels
+	lastKnownLevels  types.AudioLevels // Cache for TryRLock fallback
+	silenceDetect    *audio.SilenceDetector
+	silenceNotifier  *notify.SilenceNotifier
+	peakHolder       *audio.PeakHolder
 }
 
 // New creates a new Encoder with the given configuration and FFmpeg binary path.
@@ -68,6 +70,37 @@ func New(cfg *config.Config, ffmpegPath string) *Encoder {
 		silenceNotifier: notify.NewSilenceNotifier(cfg),
 		peakHolder:      audio.NewPeakHolder(),
 	}
+}
+
+// InitRecording initializes the recording manager.
+// This should be called before Start(). Always creates the manager
+// so recorders can be added at runtime.
+func (e *Encoder) InitRecording() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	snap := e.config.Snapshot()
+	apiKey := e.config.GetRecordingAPIKey()
+
+	mgr, err := recording.NewManager(e.ffmpegPath, apiKey, "", snap.RecordingMaxDurationMinutes)
+	if err != nil {
+		return fmt.Errorf("create recording manager: %w", err)
+	}
+
+	// Add all configured recorders
+	for i := range snap.Recorders {
+		if err := mgr.AddRecorder(&snap.Recorders[i]); err != nil {
+			slog.Warn("failed to add recorder", "id", snap.Recorders[i].ID, "error", err)
+		}
+	}
+
+	e.recordingManager = mgr
+	return nil
+}
+
+// AllRecorderStatuses returns status for all configured recorders.
+func (e *Encoder) AllRecorderStatuses() map[string]types.RecorderStatus {
+	return e.recordingManager.AllStatuses()
 }
 
 // State returns the current encoder state.
@@ -213,6 +246,11 @@ func (e *Encoder) Stop() error {
 		errs = append(errs, fmt.Errorf("stop outputs: %w", err))
 	}
 
+	// Stop recording manager (note: compliance recording continues independently)
+	if err := e.recordingManager.Stop(); err != nil {
+		errs = append(errs, fmt.Errorf("stop recording: %w", err))
+	}
+
 	// Send graceful termination signal to source.
 	if sourceProcess != nil && sourceProcess.Process != nil {
 		if err := util.GracefulSignal(sourceProcess.Process); err != nil {
@@ -252,7 +290,7 @@ func (e *Encoder) Restart() error {
 	if err := e.Stop(); err != nil {
 		return fmt.Errorf("stop: %w", err)
 	}
-	time.Sleep(1 * time.Second)
+	time.Sleep(1000 * time.Millisecond)
 	return e.Start()
 }
 
@@ -448,6 +486,11 @@ func (e *Encoder) startEnabledOutputs() {
 			slog.Error("failed to start output", "output_id", out.ID, "error", err)
 		}
 	}
+
+	// Start recording manager (starts auto-start recorders)
+	if err := e.recordingManager.Start(); err != nil {
+		slog.Error("failed to start recording manager", "error", err)
+	}
 }
 
 // runDistributor delivers audio from the source to all output processes.
@@ -457,9 +500,9 @@ func (e *Encoder) runDistributor() {
 	// Snapshot silence config once at startup (avoids mutex contention in hot path)
 	cfg := e.config.Snapshot()
 	silenceCfg := audio.SilenceConfig{
-		Threshold: cfg.SilenceThreshold,
-		Duration:  cfg.SilenceDuration,
-		Recovery:  cfg.SilenceRecovery,
+		Threshold:  cfg.SilenceThreshold,
+		DurationMs: cfg.SilenceDurationMs,
+		RecoveryMs: cfg.SilenceRecoveryMs,
 	}
 
 	distributor := NewDistributor(
@@ -501,21 +544,24 @@ func (e *Encoder) runDistributor() {
 			// WriteAudio logs errors internally and marks output as stopped
 			_ = e.outputManager.WriteAudio(out.ID, buf[:n]) //nolint:errcheck // Errors logged internally by WriteAudio
 		}
+
+		// Send audio to recording manager
+		_ = e.recordingManager.WriteAudio(buf[:n]) //nolint:errcheck // Errors logged internally by recording manager
 	}
 }
 
 // updateAudioLevels updates audio levels from calculated metrics.
 func (e *Encoder) updateAudioLevels(m *types.AudioMetrics) {
 	levels := types.AudioLevels{
-		Left:            m.RMSLeft,
-		Right:           m.RMSRight,
-		PeakLeft:        m.PeakLeft,
-		PeakRight:       m.PeakRight,
-		Silence:         m.Silence,
-		SilenceDuration: m.SilenceDuration,
-		SilenceLevel:    m.SilenceLevel,
-		ClipLeft:        m.ClipLeft,
-		ClipRight:       m.ClipRight,
+		Left:              m.RMSLeft,
+		Right:             m.RMSRight,
+		PeakLeft:          m.PeakLeft,
+		PeakRight:         m.PeakRight,
+		Silence:           m.Silence,
+		SilenceDurationMs: m.SilenceDurationMs,
+		SilenceLevel:      m.SilenceLevel,
+		ClipLeft:          m.ClipLeft,
+		ClipRight:         m.ClipRight,
 	}
 
 	e.mu.Lock()
@@ -534,4 +580,38 @@ func (e *Encoder) pollUntil(condition func() bool) <-chan struct{} {
 		close(done)
 	}()
 	return done
+}
+
+// AddRecorder adds a new recorder and saves to config.
+func (e *Encoder) AddRecorder(cfg *types.Recorder) error {
+	if err := e.config.AddRecorder(cfg); err != nil {
+		return err
+	}
+	return e.recordingManager.AddRecorder(cfg)
+}
+
+// RemoveRecorder removes a recorder and saves to config.
+func (e *Encoder) RemoveRecorder(id string) error {
+	if err := e.recordingManager.RemoveRecorder(id); err != nil {
+		slog.Warn("error removing recorder from manager", "id", id, "error", err)
+	}
+	return e.config.RemoveRecorder(id)
+}
+
+// UpdateRecorder updates a recorder configuration.
+func (e *Encoder) UpdateRecorder(cfg *types.Recorder) error {
+	if err := e.config.UpdateRecorder(cfg); err != nil {
+		return err
+	}
+	return e.recordingManager.UpdateRecorder(cfg)
+}
+
+// StartRecorder starts a specific recorder.
+func (e *Encoder) StartRecorder(id string) error {
+	return e.recordingManager.StartRecorder(id)
+}
+
+// StopRecorder stops a specific recorder.
+func (e *Encoder) StopRecorder(id string) error {
+	return e.recordingManager.StopRecorder(id)
 }

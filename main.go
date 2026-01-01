@@ -63,6 +63,11 @@ func main() {
 
 	srv := NewServer(cfg, enc, ffmpegAvailable)
 
+	// Initialize recording manager if configured
+	if err := enc.InitRecording(); err != nil {
+		slog.Error("failed to initialize recording", "error", err)
+	}
+
 	if ffmpegAvailable {
 		slog.Info("starting encoder")
 		if err := enc.Start(); err != nil {
@@ -81,8 +86,11 @@ func main() {
 
 	slog.Info("shutting down")
 
+	// Stop version checker goroutine
+	srv.version.Stop()
+
 	// Shut down HTTP server.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5000*time.Millisecond)
 	defer cancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

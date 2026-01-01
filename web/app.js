@@ -34,6 +34,53 @@ const DB_RANGE = 60;              // dB range (0 to -60)
 const CLIP_TIMEOUT_MS = 1500;     // Peak hold / clip indicator timeout
 const WS_RECONNECT_MS = 1000;     // WebSocket reconnection delay
 const EMAIL_FEEDBACK_MS = 2000;   // Email test result display duration
+const API_KEY_LENGTH = 32;        // Length of generated API keys
+const API_KEY_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+/**
+ * Generates a cryptographically secure API key.
+ * Uses Web Crypto API for secure random generation.
+ * @returns {string} 32-character alphanumeric key
+ */
+const generateApiKey = () => {
+    const array = new Uint8Array(API_KEY_LENGTH);
+    crypto.getRandomValues(array);
+    return Array.from(array, byte => API_KEY_CHARS[byte % API_KEY_CHARS.length]).join('');
+};
+
+/**
+ * Formats milliseconds to human-readable smart units.
+ * - <1000ms: shows as "XXXms"
+ * - <60000ms: shows as "Xs" or "X.Xs"
+ * - >=60000ms: shows as "Xm Ys"
+ *
+ * @param {number} ms - Duration in milliseconds
+ * @returns {string} Formatted duration
+ */
+const formatSmartDuration = (ms) => {
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    if (ms < 60000) {
+        const sec = ms / 1000;
+        return sec < 10 ? `${sec.toFixed(1)}s` : `${Math.round(sec)}s`;
+    }
+    const mins = Math.floor(ms / 60000);
+    const secs = Math.round((ms % 60000) / 1000);
+    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+};
+
+/**
+ * Converts milliseconds to seconds for UI display/input.
+ * @param {number} ms - Duration in milliseconds
+ * @returns {number} Duration in seconds
+ */
+const msToSeconds = (ms) => ms / 1000;
+
+/**
+ * Converts seconds to milliseconds for storage.
+ * @param {number} sec - Duration in seconds
+ * @returns {number} Duration in milliseconds
+ */
+const secondsToMs = (sec) => Math.round(sec * 1000);
 
 /**
  * Converts decibel value to percentage for VU meter display.
@@ -51,6 +98,20 @@ const DEFAULT_OUTPUT = {
     password: '',
     codec: 'wav',
     max_retries: 99
+};
+
+const DEFAULT_RECORDER = {
+    name: '',
+    enabled: true,
+    codec: 'mp3',
+    rotation_mode: 'hourly',
+    storage_mode: 'local',
+    local_path: '',
+    s3_endpoint: '',
+    s3_bucket: '',
+    s3_access_key_id: '',
+    s3_secret_access_key: '',
+    retention_days: 90
 };
 
 const DEFAULT_LEVELS = {
@@ -82,7 +143,8 @@ document.addEventListener('alpine:init', () => {
 
         settingsTabs: [
             { id: 'audio', label: 'Audio', icon: 'audio' },
-            { id: 'notifications', label: 'Notifications', icon: 'bell' },
+            { id: 'notifications', label: 'Notifications', icon: 'email' },
+            { id: 'recording', label: 'Recording', icon: 'microphone' },
             { id: 'about', label: 'About', icon: 'info' }
         ],
 
@@ -101,6 +163,13 @@ document.addEventListener('alpine:init', () => {
         outputStatuses: {},
         previousOutputStatuses: {},
         deletingOutputs: {},
+        connectingAnimations: {},  // Track output connection animations reactively
+
+        recorders: [],
+        recorderStatuses: {},
+        deletingRecorders: {},
+        recorderForm: { ...DEFAULT_RECORDER, id: '' },
+        recorderFormDirty: false,
 
         devices: [],
         levels: { ...DEFAULT_LEVELS },
@@ -116,6 +185,7 @@ document.addEventListener('alpine:init', () => {
             silenceWebhook: '',
             silenceLogPath: '',
             email: { host: '', port: 587, fromName: '', username: '', password: '', recipients: '' },
+            recordingApiKey: '',
             platform: ''
         },
         originalSettings: null,
@@ -129,7 +199,8 @@ document.addEventListener('alpine:init', () => {
         testStates: {
             webhook: { pending: false, text: 'Test' },
             log: { pending: false, text: 'Test' },
-            email: { pending: false, text: 'Test' }
+            email: { pending: false, text: 'Test' },
+            recorderS3: { pending: false, text: 'Test Connection' }
         },
 
         silenceLogModal: {
@@ -148,6 +219,8 @@ document.addEventListener('alpine:init', () => {
         },
 
         ws: null,
+        _keydownHandler: null,
+        _bannerTimeout: null,
 
         // Computed properties
         /**
@@ -167,6 +240,31 @@ document.addEventListener('alpine:init', () => {
             return this.outputForm.id !== '';
         },
 
+        get isRecorderEditMode() {
+            return this.recorderForm.id !== '';
+        },
+
+        /**
+         * Validates recorder form and returns true if form can be saved.
+         * Checks required fields based on storage mode.
+         * @returns {boolean} True if form is valid and can be submitted
+         */
+        get canSaveRecorder() {
+            if (!this.recorderForm.name?.trim()) return false;
+            if (this.isRecorderEditMode && !this.recorderFormDirty) return false;
+
+            const needsLocal = ['local', 'both'].includes(this.recorderForm.storage_mode);
+            const needsS3 = ['s3', 'both'].includes(this.recorderForm.storage_mode);
+
+            if (needsLocal && !this.recorderForm.local_path?.trim()) return false;
+            if (needsS3) {
+                if (!this.recorderForm.s3_bucket?.trim()) return false;
+                if (!this.recorderForm.s3_access_key_id?.trim()) return false;
+                if (!this.isRecorderEditMode && !this.recorderForm.s3_secret_access_key) return false;
+            }
+            return true;
+        },
+
         // Lifecycle
         /**
          * Alpine.js lifecycle hook - initializes WebSocket connection.
@@ -174,8 +272,32 @@ document.addEventListener('alpine:init', () => {
          */
         init() {
             this.connectWebSocket();
-            // Global keyboard handlers
-            document.addEventListener('keydown', (e) => this.handleGlobalKeydown(e));
+            // Global keyboard handlers - store reference for cleanup
+            this._keydownHandler = (e) => this.handleGlobalKeydown(e);
+            document.addEventListener('keydown', this._keydownHandler);
+        },
+
+        /**
+         * Alpine.js lifecycle hook - cleanup on component destruction.
+         * Removes event listeners and closes WebSocket to prevent memory leaks.
+         */
+        destroy() {
+            if (this._keydownHandler) {
+                document.removeEventListener('keydown', this._keydownHandler);
+                this._keydownHandler = null;
+            }
+            if (this._bannerTimeout) {
+                clearTimeout(this._bannerTimeout);
+                this._bannerTimeout = null;
+            }
+            if (this.clipTimeout) {
+                clearTimeout(this.clipTimeout);
+                this.clipTimeout = null;
+            }
+            if (this.ws) {
+                this.ws.close();
+                this.ws = null;
+            }
         },
 
         /**
@@ -193,12 +315,12 @@ document.addEventListener('alpine:init', () => {
             // Escape: Close views/modals
             if (event.key === 'Escape') {
                 if (this.silenceLogModal.visible) {
-                    this.closeSilenceLog();
+                    this.handleSilenceLogClose();
                     event.preventDefault();
                 } else if (this.view === 'settings') {
                     this.cancelSettings();
                     event.preventDefault();
-                } else if (this.view === 'output-form') {
+                } else if (this.view === 'output-form' || this.view === 'recorder-form') {
                     this.showDashboard();
                     event.preventDefault();
                 }
@@ -231,13 +353,18 @@ document.addEventListener('alpine:init', () => {
         },
 
         /**
-         * Navigates to adjacent tab in settings.
+         * Navigates to adjacent tab in settings and focuses the tab button.
          * @param {number} direction - 1 for next, -1 for previous
          */
         navigateTab(direction) {
             const currentIndex = this.settingsTabs.findIndex(t => t.id === this.settingsTab);
             const newIndex = (currentIndex + direction + this.settingsTabs.length) % this.settingsTabs.length;
-            this.showTab(this.settingsTabs[newIndex].id);
+            const newTabId = this.settingsTabs[newIndex].id;
+            this.showTab(newTabId);
+            // Focus the new tab button for continued keyboard navigation
+            this.$nextTick(() => {
+                document.getElementById(`tab-${newTabId}`)?.focus();
+            });
         },
 
         /**
@@ -250,7 +377,13 @@ document.addEventListener('alpine:init', () => {
             this.ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
             this.ws.onmessage = (e) => {
-                const msg = JSON.parse(e.data);
+                let msg;
+                try {
+                    msg = JSON.parse(e.data);
+                } catch {
+                    console.error('Invalid WebSocket message:', e.data);
+                    return;
+                }
                 if (msg.type === 'levels') {
                     this.handleLevels(msg.levels);
                 } else if (msg.type === 'status') {
@@ -259,6 +392,10 @@ document.addEventListener('alpine:init', () => {
                     this.handleTestResult(msg);
                 } else if (msg.type === 'silence_log_result') {
                     this.handleSilenceLogResult(msg);
+                } else if (msg.type === 'recorder_s3_test_result') {
+                    this.handleRecorderS3TestResult(msg);
+                } else if (msg.type === 'recorder_result') {
+                    this.handleRecorderResult(msg);
                 }
             };
 
@@ -304,8 +441,8 @@ document.addEventListener('alpine:init', () => {
             }
 
             // Update banner message with current duration if silence banner is showing
-            if (this.banner.visible && this.banner.type !== 'info' && levels.silence_duration) {
-                const duration = this.formatDuration(levels.silence_duration);
+            if (this.banner.visible && this.banner.type !== 'info' && levels.silence_duration_ms) {
+                const duration = formatSmartDuration(levels.silence_duration_ms);
                 if (newSilenceState === 'critical') {
                     this.banner.message = `Critical silence: ${duration}`;
                 } else if (newSilenceState === 'warning') {
@@ -327,7 +464,7 @@ document.addEventListener('alpine:init', () => {
          * @param {string} next - New silence state
          */
         handleSilenceTransition(prev, next) {
-            const duration = this.formatDuration(this.levels.silence_duration || 0);
+            const duration = formatSmartDuration(this.levels.silence_duration_ms || 0);
             if (next === 'warning' && prev === 'active') {
                 this.showBanner(`Silence detected: ${duration}`, 'warning', false);
             } else if (next === 'critical') {
@@ -348,11 +485,30 @@ document.addEventListener('alpine:init', () => {
          */
         getSilenceState() {
             if (!this.levels.silence_level) return '';
-            const duration = this.levels.silence_duration || 0;
-            const threshold = this.settings.silenceDuration || 15;
-            if (duration >= threshold * 4) return 'critical';
-            if (duration >= threshold * 2) return 'warning';
+            const durationMs = this.levels.silence_duration_ms || 0;
+            const thresholdMs = secondsToMs(this.settings.silenceDuration || 15);
+            if (durationMs >= thresholdMs * 4) return 'critical';
+            if (durationMs >= thresholdMs * 2) return 'warning';
             return 'active';
+        },
+
+        /**
+         * Returns CSS class for silence indicator dot.
+         * @returns {string} State class for dot styling
+         */
+        getSilenceStateClass() {
+            const state = this.getSilenceState();
+            if (state === 'critical') return 'state-danger';
+            if (state === 'warning' || state === 'active') return 'state-warning';
+            return '';
+        },
+
+        /**
+         * Returns CSS class for clip indicator dot.
+         * @returns {string} State class for dot styling
+         */
+        getClipStateClass() {
+            return this.clipActive ? 'state-danger' : '';
         },
 
         /**
@@ -390,16 +546,11 @@ document.addEventListener('alpine:init', () => {
                 const isNowConnected = newStatus.stable;
 
                 if (wasNotConnected && isNowConnected) {
-                    // Trigger animation by temporarily setting data attribute
-                    this.$nextTick(() => {
-                        const dotElement = document.querySelector(`[data-output-id="${id}"] .dot`);
-                        if (dotElement) {
-                            dotElement.dataset.connected = 'true';
-                            setTimeout(() => {
-                                delete dotElement.dataset.connected;
-                            }, 400);
-                        }
-                    });
+                    // Trigger animation via reactive state instead of DOM manipulation
+                    this.connectingAnimations[id] = true;
+                    setTimeout(() => {
+                        delete this.connectingAnimations[id];
+                    }, 400);
                 }
             }
 
@@ -413,24 +564,23 @@ document.addEventListener('alpine:init', () => {
                 }
             }
 
-            // Devices
-            if (msg.devices) {
-                this.devices = msg.devices;
-            }
-
-            // Only update settings from status when not on settings view to prevent
-            // overwriting user input while editing
+            // Only update settings and devices from status when not on settings view
+            // to prevent overwriting user input while editing
             if (this.view !== 'settings') {
+                // Devices (frozen while in settings to keep dropdown stable)
+                if (msg.devices) {
+                    this.devices = msg.devices;
+                }
                 if (msg.settings?.audio_input) {
                     this.settings.audioInput = msg.settings.audio_input;
                 }
                 if (msg.settings?.platform !== undefined) {
                     this.settings.platform = msg.settings.platform;
                 }
-                // Silence detection settings
+                // Silence detection settings (convert ms to seconds for UI)
                 this.settings.silenceThreshold = msg.silence_threshold ?? -40;
-                this.settings.silenceDuration = msg.silence_duration ?? 15;
-                this.settings.silenceRecovery = msg.silence_recovery ?? 5;
+                this.settings.silenceDuration = msToSeconds(msg.silence_duration_ms ?? 15000);
+                this.settings.silenceRecovery = msToSeconds(msg.silence_recovery_ms ?? 5000);
                 this.settings.silenceWebhook = msg.silence_webhook ?? '';
                 this.settings.silenceLogPath = msg.silence_log_path ?? '';
                 // Email settings
@@ -447,6 +597,22 @@ document.addEventListener('alpine:init', () => {
                 // Show banner once when update becomes available
                 if (msg.version.updateAvail && !wasUpdateAvail) {
                     this.showBanner(`Update available: ${msg.version.latest}`, 'info', false);
+                }
+            }
+
+            // Sync recorders and statuses
+            this.recorders = msg.recorders || [];
+            this.recorderStatuses = msg.recorder_statuses || {};
+            // Only sync API key when not in settings view
+            if (this.view !== 'settings') {
+                this.settings.recordingApiKey = msg.recording_api_key || '';
+            }
+
+            // Clean up deleting recorders that are no longer in the list
+            for (const id in this.deletingRecorders) {
+                const recorder = this.recorders.find(r => r.id === id);
+                if (!recorder || recorder.created_at !== this.deletingRecorders[id]) {
+                    delete this.deletingRecorders[id];
                 }
             }
         },
@@ -552,6 +718,10 @@ document.addEventListener('alpine:init', () => {
             if (this.settings.email.password) {
                 update.email_password = this.settings.email.password;
             }
+            // Only include API key if it changed from original
+            if (this.settings.recordingApiKey !== this.originalSettings?.recordingApiKey) {
+                update.recording_api_key = this.settings.recordingApiKey;
+            }
             this.send('update_settings', null, update);
             this.saveAndClose();
         },
@@ -578,11 +748,19 @@ document.addEventListener('alpine:init', () => {
         },
 
         /**
-         * Switches active settings tab.
-         * @param {string} tabId - Tab identifier (audio, notifications, about)
+         * Switches active settings tab and manages focus.
+         * @param {string} tabId - Tab identifier (audio, notifications, recording, about)
+         * @param {boolean} focusPanel - If true, focus first input in panel
          */
-        showTab(tabId) {
+        showTab(tabId, focusPanel = false) {
             this.settingsTab = tabId;
+            if (focusPanel) {
+                this.$nextTick(() => {
+                    const panel = document.getElementById(`panel-${tabId}`);
+                    const focusable = panel?.querySelector('input, select, button, [tabindex="0"]');
+                    focusable?.focus();
+                });
+            }
         },
 
         // Output management
@@ -625,6 +803,217 @@ document.addEventListener('alpine:init', () => {
 
         markOutputFormDirty() {
             this.outputFormDirty = true;
+        },
+
+        // Recorder management
+
+        /**
+         * Shows recorder form for adding or editing a recorder.
+         * @param {string|null} id - Recorder ID for editing, null for new
+         */
+        showRecorderForm(id = null) {
+            if (id) {
+                const recorder = this.recorders.find(r => r.id === id);
+                if (!recorder) return;
+                this.recorderForm = {
+                    id: recorder.id,
+                    name: recorder.name,
+                    enabled: recorder.enabled !== false,
+                    codec: recorder.codec || 'mp3',
+                    rotation_mode: recorder.rotation_mode || 'hourly',
+                    storage_mode: recorder.storage_mode || 'local',
+                    local_path: recorder.local_path || '',
+                    s3_endpoint: recorder.s3_endpoint || '',
+                    s3_bucket: recorder.s3_bucket || '',
+                    s3_access_key_id: recorder.s3_access_key_id || '',
+                    s3_secret_access_key: '',
+                    retention_days: recorder.retention_days || 90
+                };
+            } else {
+                this.recorderForm = { ...DEFAULT_RECORDER, id: '' };
+            }
+            this.recorderFormDirty = false;
+            this.view = 'recorder-form';
+        },
+
+        markRecorderFormDirty() {
+            this.recorderFormDirty = true;
+        },
+
+        /**
+         * Submits recorder form for add or update.
+         */
+        submitRecorderForm() {
+            const name = this.recorderForm.name?.trim();
+            const storageMode = this.recorderForm.storage_mode;
+            const localPath = this.recorderForm.local_path?.trim();
+            const bucket = this.recorderForm.s3_bucket?.trim();
+            const accessKey = this.recorderForm.s3_access_key_id?.trim();
+            const secretKey = this.recorderForm.s3_secret_access_key;
+
+            // Validate required fields
+            if (!name) {
+                this.showBanner('Name is required', 'danger', true);
+                return;
+            }
+
+            // Validate based on storage mode
+            const needsLocal = storageMode === 'local' || storageMode === 'both';
+            const needsS3 = storageMode === 's3' || storageMode === 'both';
+
+            if (needsLocal && !localPath) {
+                this.showBanner('Local Path is required', 'danger', true);
+                return;
+            }
+            if (needsS3) {
+                if (!bucket) {
+                    this.showBanner('S3 Bucket is required', 'danger', true);
+                    return;
+                }
+                if (!accessKey) {
+                    this.showBanner('S3 Access Key ID is required', 'danger', true);
+                    return;
+                }
+                // Secret key required for new recorders
+                if (!this.isRecorderEditMode && !secretKey) {
+                    this.showBanner('S3 Secret Access Key is required', 'danger', true);
+                    return;
+                }
+            }
+
+            const data = {
+                name: name,
+                enabled: this.recorderForm.enabled,
+                codec: this.recorderForm.codec,
+                rotation_mode: this.recorderForm.rotation_mode,
+                storage_mode: storageMode,
+                local_path: localPath,
+                s3_endpoint: this.recorderForm.s3_endpoint.trim(),
+                s3_bucket: bucket,
+                s3_access_key_id: accessKey,
+                retention_days: this.recorderForm.retention_days || 90
+            };
+
+            if (secretKey) {
+                data.s3_secret_access_key = secretKey;
+            }
+
+            if (this.isRecorderEditMode) {
+                this.send('update_recorder', this.recorderForm.id, data);
+            } else {
+                this.send('add_recorder', null, data);
+            }
+            // Navigation handled by handleRecorderResult on success
+        },
+
+        /**
+         * Deletes a recorder with confirmation.
+         * @param {string} id - Recorder ID to delete
+         * @param {boolean} returnToDashboard - Navigate to dashboard after delete
+         */
+        deleteRecorder(id, returnToDashboard = false) {
+            if (!confirm('Delete this recorder? This action cannot be undone.')) return;
+            const recorder = this.recorders.find(r => r.id === id);
+            if (recorder) this.deletingRecorders[id] = recorder.created_at;
+            this.send('delete_recorder', id, null);
+            if (returnToDashboard) this.showDashboard();
+        },
+
+        /**
+         * Starts recording for a specific recorder.
+         * @param {string} id - Recorder ID
+         */
+        startRecorder(id) {
+            this.send('start_recorder', id, null);
+        },
+
+        /**
+         * Stops recording for a specific recorder.
+         * @param {string} id - Recorder ID
+         */
+        stopRecorder(id) {
+            this.send('stop_recorder', id, null);
+        },
+
+        /**
+         * Tests S3 connection for the current recorder form.
+         */
+        testRecorderS3() {
+            this.testStates.recorderS3 = { pending: true, text: 'Testing...' };
+            this.send('test_recorder_s3', null, {
+                s3_endpoint: this.recorderForm.s3_endpoint,
+                s3_bucket: this.recorderForm.s3_bucket,
+                s3_access_key_id: this.recorderForm.s3_access_key_id,
+                s3_secret_access_key: this.recorderForm.s3_secret_access_key
+            });
+        },
+
+        /**
+         * Returns CSS class for recorder status dot.
+         * @param {Object} recorder - Recorder object
+         * @returns {string} CSS class
+         */
+        getRecorderStateClass(recorder) {
+            if (recorder.enabled === false) return 'state-stopped';
+            const status = this.recorderStatuses[recorder.id];
+            if (!status) return 'state-stopped';
+            switch (status.state) {
+                case 'recording': return 'state-success';
+                case 'error': return 'state-danger';
+                case 'idle': return 'state-stopped';
+                default: return 'state-stopped';
+            }
+        },
+
+        /**
+         * Returns status text for a recorder.
+         * @param {Object} recorder - Recorder object
+         * @returns {string} Status text
+         */
+        getRecorderStatusText(recorder) {
+            if (recorder.enabled === false) return 'Disabled';
+            const status = this.recorderStatuses[recorder.id];
+            if (!status) return 'Idle';
+            switch (status.state) {
+                case 'recording': return 'Recording';
+                case 'error': return status.error || 'Error';
+                case 'idle': return 'Idle';
+                default: return status.state || 'Unknown';
+            }
+        },
+
+        /**
+         * Computes all display data for a recorder in a single call.
+         * @param {Object} recorder - Recorder object
+         * @returns {Object} Display data with stateClass, statusText, duration
+         */
+        getRecorderDisplayData(recorder) {
+            const status = this.recorderStatuses[recorder.id] || {};
+            const isDeleting = this.deletingRecorders[recorder.id] === recorder.created_at;
+
+            let stateClass = 'state-stopped';
+            let statusText = 'Idle';
+
+            if (isDeleting) {
+                stateClass = 'state-warning';
+                statusText = 'Deleting...';
+            } else if (recorder.enabled === false) {
+                stateClass = 'state-stopped';
+                statusText = 'Disabled';
+            } else if (status.state === 'recording') {
+                stateClass = 'state-success';
+                statusText = 'Recording';
+            } else if (status.state === 'error') {
+                stateClass = 'state-danger';
+                statusText = status.error || 'Error';
+            }
+
+            return {
+                stateClass,
+                statusText,
+                durationMs: status.duration_ms || 0,
+                isRecording: status.state === 'recording'
+            };
         },
 
         /**
@@ -709,6 +1098,63 @@ document.addEventListener('alpine:init', () => {
         },
 
         /**
+         * Handles recorder S3 connection test result.
+         * @param {Object} msg - Result with success, error
+         */
+        handleRecorderS3TestResult(msg) {
+            this.testStates.recorderS3.pending = false;
+            this.testStates.recorderS3.text = msg.success ? 'Connected!' : 'Failed';
+
+            if (!msg.success) {
+                this.showBanner(`S3 test failed: ${msg.error || 'Unknown error'}`, 'danger', false);
+            }
+
+            setTimeout(() => {
+                this.testStates.recorderS3.text = 'Test Connection';
+            }, EMAIL_FEEDBACK_MS);
+        },
+
+        /**
+         * Handles recorder operation results (add, update, delete, start, stop).
+         * @param {Object} msg - Result with action, success, error
+         */
+        handleRecorderResult(msg) {
+            if (!msg.success) {
+                this.showBanner(`Recorder ${msg.action} failed: ${msg.error || 'Unknown error'}`, 'danger', false);
+                return;
+            }
+
+            // On successful add/update, go back to dashboard
+            if (msg.action === 'add' || msg.action === 'update') {
+                this.view = 'dashboard';
+                this.recorderFormDirty = false;
+            }
+        },
+
+        /**
+         * Regenerates the API key for recording endpoints.
+         * Generates key client-side and marks settings dirty.
+         * Key is persisted when user clicks Save.
+         */
+        regenerateApiKey() {
+            if (!confirm('Regenerate API key? Click Save to apply. Existing integrations will need to be updated.')) return;
+            this.settings.recordingApiKey = generateApiKey();
+            this.markSettingsDirty();
+        },
+
+        /**
+         * Copies the API key to clipboard.
+         */
+        async copyApiKey() {
+            try {
+                await navigator.clipboard.writeText(this.settings.recordingApiKey);
+                this.showBanner('API key copied to clipboard', 'info', false);
+            } catch {
+                this.showBanner('Failed to copy to clipboard', 'danger', false);
+            }
+        },
+
+        /**
          * Handles silence log view result from backend.
          * Updates modal state with log entries or error message.
          *
@@ -737,29 +1183,39 @@ document.addEventListener('alpine:init', () => {
             this.send('view_silence_log', null, null);
         },
 
-        closeSilenceLog() {
+        handleSilenceLogClose() {
             this.silenceLogModal.visible = false;
         },
 
-        refreshSilenceLog() {
+        handleSilenceLogRefresh() {
             this.silenceLogModal.loading = true;
             this.send('view_silence_log', null, null);
         },
 
         /**
          * Shows an alert banner notification.
+         * Clears any existing auto-hide timeout to prevent race conditions.
          * @param {string} message - Message to display
          * @param {string} type - Banner type: 'info', 'warning', 'danger'
          * @param {boolean} persistent - If true, banner stays until dismissed
          */
         showBanner(message, type = 'info', persistent = false) {
+            // Clear existing timeout to prevent premature hiding of new banner
+            if (this._bannerTimeout) {
+                clearTimeout(this._bannerTimeout);
+                this._bannerTimeout = null;
+            }
             this.banner = { visible: true, message, type, persistent };
             if (!persistent) {
-                setTimeout(() => this.hideBanner(), 10000);
+                this._bannerTimeout = setTimeout(() => this.hideBanner(), 10000);
             }
         },
 
         hideBanner() {
+            if (this._bannerTimeout) {
+                clearTimeout(this._bannerTimeout);
+                this._bannerTimeout = null;
+            }
             this.banner.visible = false;
         },
 
@@ -779,7 +1235,7 @@ document.addEventListener('alpine:init', () => {
          * Formats a silence log entry for display.
          * For "ended" events, duration is the key metric (total silence time).
          * For "started" events, duration is just detection delay (not shown).
-         * @param {Object} entry - Log entry with timestamp, event, duration_sec, threshold_db
+         * @param {Object} entry - Log entry with timestamp, event, duration_ms, threshold_db
          * @returns {Object} Formatted entry with human-readable values
          */
         formatLogEntry(entry) {
@@ -791,7 +1247,7 @@ document.addEventListener('alpine:init', () => {
             // For ended events, show duration prominently in the event name
             let eventText = 'Unknown event';
             if (isEnd) {
-                const dur = entry.duration_sec > 0 ? this.formatDuration(entry.duration_sec) : '';
+                const dur = entry.duration_ms > 0 ? formatSmartDuration(entry.duration_ms) : '';
                 eventText = dur ? `Silence ended: ${dur}` : 'Silence ended';
             } else if (isStart) {
                 eventText = 'Silence detected';
@@ -799,10 +1255,16 @@ document.addEventListener('alpine:init', () => {
                 eventText = 'Test entry';
             }
 
+            // Map event type to state class
+            let stateClass = 'state-stopped';
+            if (isStart) stateClass = 'state-warning';
+            else if (isEnd) stateClass = 'state-success';
+
             return {
                 time: date.toLocaleString(),
                 event: eventText,
                 eventType: isStart ? 'silence' : isEnd ? 'recovery' : 'test',
+                stateClass,
                 // Only show threshold, duration is now in the event name for ended events
                 threshold: `${entry.threshold_db.toFixed(0)} dB`
             };
