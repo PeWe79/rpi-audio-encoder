@@ -88,23 +88,58 @@ Configure via the web interface under Settings → Alerts.
 
 Email notifications are sent via Microsoft Graph API using Client Credentials flow (app-only authentication).
 
-**Azure AD Setup:**
-1. Create an App Registration in Azure Portal
-2. Add API Permissions: `Mail.Send` (Application) + `Application.Read.All` (Application, for secret expiry warnings)
-3. Grant admin consent for the permissions
-4. Create a Client Secret and note the expiration date
-5. Create or use an existing Shared Mailbox (e.g., `alerts@yourcompany.com`)
+**Step 1: Create an App Registration**
+
+1. Go to [Azure Portal - App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
+2. Click **New registration**
+3. Enter a name (e.g., "Audio Encoder Alerts")
+4. Select **Accounts in this organizational directory only**
+5. Leave Redirect URI empty and click **Register**
+6. Copy the **Application (client) ID** and **Directory (tenant) ID** from the Overview page
+
+**Step 2: Add API Permissions**
+
+1. In your app registration, go to **API permissions**
+2. Click **Add a permission** → **Microsoft Graph** → **Application permissions**
+3. Add these permissions:
+   - `Mail.Send` - Required for sending emails
+   - `Application.Read.All` - Optional, enables secret expiry warnings in the UI
+4. Click **Grant admin consent for [your organization]** (requires admin rights)
+
+> **Tip:** If you don't have admin rights, ask your IT administrator to grant consent via [Enterprise applications](https://portal.azure.com/#view/Microsoft_AAD_IAM/StartboardApplicationsMenuBlade/~/AppAppsPreview).
+
+**Step 3: Create a Client Secret**
+
+1. Go to **Certificates & secrets** → **Client secrets**
+2. Click **New client secret**
+3. Add a description and select an expiry period (max 24 months)
+4. Click **Add** and **immediately copy the secret value** (it won't be shown again)
+
+> **Note:** Set a calendar reminder to rotate the secret before it expires. The encoder shows a warning banner when the secret expires within 30 days.
+
+**Step 4: Create or Configure a Shared Mailbox**
+
+The app sends emails "from" a shared mailbox (not a user mailbox). This is required for app-only authentication.
+
+1. Go to [Exchange Admin Center](https://admin.exchange.microsoft.com/#/sharedmailboxes)
+2. Create a new shared mailbox (e.g., `alerts@yourcompany.com`) or use an existing one
+3. No license is required for shared mailboxes
 
 **Required Configuration:**
+
 | Field | Description |
 |-------|-------------|
-| Tenant ID | Your Azure AD tenant ID (GUID) |
-| Client ID | App registration client ID (GUID) |
-| Client Secret | App registration client secret |
-| From Address | Shared mailbox email address |
+| Tenant ID | Directory (tenant) ID from app registration overview |
+| Client ID | Application (client) ID from app registration overview |
+| Client Secret | Secret value created in step 3 |
+| From Address | Shared mailbox email address (e.g., `alerts@yourcompany.com`) |
 | Recipients | Comma-separated list of recipient email addresses |
 
-The encoder will display a warning banner when the client secret is expiring within 30 days.
+**Troubleshooting:**
+
+- **"Mailbox not found"**: The From Address must be a valid shared mailbox in your tenant
+- **"Access denied"**: Admin consent not granted, or wrong permission type (must be Application, not Delegated)
+- **"Invalid credentials"**: Check Tenant ID, Client ID, and Client Secret are correct
 
 ## Configuration
 
