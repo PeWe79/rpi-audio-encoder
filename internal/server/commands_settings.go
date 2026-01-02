@@ -81,19 +81,18 @@ func (h *CommandHandler) handleAudioInputChange(input string) {
 
 func (h *CommandHandler) handleUpdateSettings(cmd WSCommand) {
 	var settings struct {
-		AudioInput       string   `json:"audio_input"`
-		SilenceThreshold *float64 `json:"silence_threshold"`
-		SilenceDuration  *float64 `json:"silence_duration"`
-		SilenceRecovery  *float64 `json:"silence_recovery"`
-		SilenceWebhook   *string  `json:"silence_webhook"`
-		SilenceLogPath   *string  `json:"silence_log_path"`
-		EmailSMTPHost    *string  `json:"email_smtp_host"`
-		EmailSMTPPort    *int     `json:"email_smtp_port"`
-		EmailFromName    *string  `json:"email_from_name"`
-		EmailUsername    *string  `json:"email_username"`
-		EmailPassword    *string  `json:"email_password"`
-		EmailRecipients  *string  `json:"email_recipients"`
-		RecordingAPIKey  *string  `json:"recording_api_key"`
+		AudioInput        string   `json:"audio_input"`
+		SilenceThreshold  *float64 `json:"silence_threshold"`
+		SilenceDuration   *float64 `json:"silence_duration"`
+		SilenceRecovery   *float64 `json:"silence_recovery"`
+		SilenceWebhook    *string  `json:"silence_webhook"`
+		SilenceLogPath    *string  `json:"silence_log_path"`
+		GraphTenantID     *string  `json:"graph_tenant_id"`
+		GraphClientID     *string  `json:"graph_client_id"`
+		GraphClientSecret *string  `json:"graph_client_secret"`
+		GraphFromAddress  *string  `json:"graph_from_address"`
+		GraphRecipients   *string  `json:"graph_recipients"`
+		RecordingAPIKey   *string  `json:"recording_api_key"`
 	}
 	if err := json.Unmarshal(cmd.Data, &settings); err != nil {
 		slog.Warn("update_settings: invalid JSON data", "error", err)
@@ -107,40 +106,38 @@ func (h *CommandHandler) handleUpdateSettings(cmd WSCommand) {
 	updateSecondsToMsSetting(settings.SilenceRecovery, 0.5, 60, "silence recovery", h.cfg.SetSilenceRecoveryMs)
 	updateStringSetting(settings.SilenceWebhook, "webhook URL", h.cfg.SetWebhookURL)
 	updateStringSetting(settings.SilenceLogPath, "log path", h.cfg.SetLogPath)
-	if settings.EmailSMTPHost != nil || settings.EmailSMTPPort != nil ||
-		settings.EmailFromName != nil || settings.EmailUsername != nil ||
-		settings.EmailPassword != nil || settings.EmailRecipients != nil {
+	if settings.GraphTenantID != nil || settings.GraphClientID != nil ||
+		settings.GraphClientSecret != nil || settings.GraphFromAddress != nil ||
+		settings.GraphRecipients != nil {
 		// Get current values via snapshot (single mutex acquisition)
 		snap := h.cfg.Snapshot()
-		host := snap.EmailSMTPHost
-		port := snap.EmailSMTPPort
-		fromName := snap.EmailFromName
-		username := snap.EmailUsername
-		password := snap.EmailPassword
-		recipients := snap.EmailRecipients
-		if settings.EmailSMTPHost != nil {
-			host = *settings.EmailSMTPHost
+		tenantID := snap.GraphTenantID
+		clientID := snap.GraphClientID
+		clientSecret := snap.GraphClientSecret
+		fromAddress := snap.GraphFromAddress
+		recipients := snap.GraphRecipients
+		if settings.GraphTenantID != nil {
+			tenantID = *settings.GraphTenantID
 		}
-		if settings.EmailSMTPPort != nil {
-			port = max(1, min(*settings.EmailSMTPPort, 65535))
+		if settings.GraphClientID != nil {
+			clientID = *settings.GraphClientID
 		}
-		if settings.EmailFromName != nil {
-			fromName = *settings.EmailFromName
+		if settings.GraphClientSecret != nil {
+			clientSecret = *settings.GraphClientSecret
 		}
-		if settings.EmailUsername != nil {
-			username = *settings.EmailUsername
+		if settings.GraphFromAddress != nil {
+			fromAddress = *settings.GraphFromAddress
 		}
-		if settings.EmailPassword != nil {
-			password = *settings.EmailPassword
-		}
-		if settings.EmailRecipients != nil {
-			recipients = *settings.EmailRecipients
+		if settings.GraphRecipients != nil {
+			recipients = *settings.GraphRecipients
 		}
 
-		slog.Info("update_settings: updating email configuration")
-		if err := h.cfg.SetEmailConfig(host, port, fromName, username, password, recipients); err != nil {
-			slog.Error("update_settings: failed to save email config", "error", err)
+		slog.Info("update_settings: updating Microsoft Graph configuration")
+		if err := h.cfg.SetGraphConfig(tenantID, clientID, clientSecret, fromAddress, recipients); err != nil {
+			slog.Error("update_settings: failed to save Graph config", "error", err)
 		}
+		// Notify encoder to update expiry checker with new config
+		h.encoder.UpdateGraphConfig()
 	}
 	// Handle API key update
 	if settings.RecordingAPIKey != nil {

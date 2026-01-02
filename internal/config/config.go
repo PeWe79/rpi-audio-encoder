@@ -26,15 +26,11 @@ const (
 	DefaultSilenceThreshold            = -40.0
 	DefaultSilenceDurationMs           = 15000 // 15 seconds in milliseconds
 	DefaultSilenceRecoveryMs           = 5000  // 5 seconds in milliseconds
-	DefaultEmailSMTPPort               = 587
 	DefaultStationName                 = "ZuidWest FM"
 	DefaultStationColorLight           = "#E6007E"
 	DefaultStationColorDark            = "#E6007E"
 	DefaultRecordingMaxDurationMinutes = 240 // 4 hours for on-demand recorders
 )
-
-// Default email from name placeholder.
-const DefaultEmailFromName = DefaultStationName
 
 // Validation patterns.
 var (
@@ -66,7 +62,7 @@ type SilenceDetectionConfig struct {
 type NotificationsConfig struct {
 	WebhookURL string            `json:"webhook_url,omitempty"`
 	LogPath    string            `json:"log_path,omitempty"`
-	Email      types.EmailConfig `json:"email,omitempty"`
+	Graph      types.GraphConfig `json:"graph,omitempty"`
 }
 
 // StationConfig is the station branding configuration.
@@ -474,17 +470,23 @@ func (c *Config) SetLogPath(path string) error {
 	return c.saveLocked()
 }
 
-// SetEmailConfig updates all email configuration fields and saves.
-func (c *Config) SetEmailConfig(host string, port int, fromName, username, password, recipients string) error {
+// SetGraphConfig updates all Microsoft Graph configuration fields and saves.
+func (c *Config) SetGraphConfig(tenantID, clientID, clientSecret, fromAddress, recipients string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Notifications.Email.Host = host
-	c.Notifications.Email.Port = port
-	c.Notifications.Email.FromName = fromName
-	c.Notifications.Email.Username = username
-	c.Notifications.Email.Password = password
-	c.Notifications.Email.Recipients = recipients
+	c.Notifications.Graph.TenantID = tenantID
+	c.Notifications.Graph.ClientID = clientID
+	c.Notifications.Graph.ClientSecret = clientSecret
+	c.Notifications.Graph.FromAddress = fromAddress
+	c.Notifications.Graph.Recipients = recipients
 	return c.saveLocked()
+}
+
+// GraphConfig returns a copy of the current Graph configuration.
+func (c *Config) GraphConfig() types.GraphConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Notifications.Graph
 }
 
 // Snapshot is a point-in-time copy of configuration values.
@@ -514,13 +516,12 @@ type Snapshot struct {
 	WebhookURL string
 	LogPath    string
 
-	// Email
-	EmailSMTPHost   string
-	EmailSMTPPort   int
-	EmailFromName   string
-	EmailUsername   string
-	EmailPassword   string
-	EmailRecipients string
+	// Microsoft Graph
+	GraphTenantID     string
+	GraphClientID     string
+	GraphClientSecret string
+	GraphFromAddress  string
+	GraphRecipients   string
 
 	// Recording
 	RecordingAPIKey             string
@@ -564,13 +565,12 @@ func (c *Config) Snapshot() Snapshot {
 		WebhookURL: c.Notifications.WebhookURL,
 		LogPath:    c.Notifications.LogPath,
 
-		// Email (with defaults)
-		EmailSMTPHost:   c.Notifications.Email.Host,
-		EmailSMTPPort:   cmp.Or(c.Notifications.Email.Port, DefaultEmailSMTPPort),
-		EmailFromName:   cmp.Or(c.Notifications.Email.FromName, c.Station.Name),
-		EmailUsername:   c.Notifications.Email.Username,
-		EmailPassword:   c.Notifications.Email.Password,
-		EmailRecipients: c.Notifications.Email.Recipients,
+		// Microsoft Graph
+		GraphTenantID:     c.Notifications.Graph.TenantID,
+		GraphClientID:     c.Notifications.Graph.ClientID,
+		GraphClientSecret: c.Notifications.Graph.ClientSecret,
+		GraphFromAddress:  c.Notifications.Graph.FromAddress,
+		GraphRecipients:   c.Notifications.Graph.Recipients,
 
 		// Recording
 		RecordingAPIKey:             c.RecordingAPIKey,
@@ -589,9 +589,10 @@ func (s *Snapshot) HasWebhook() bool {
 	return s.WebhookURL != ""
 }
 
-// HasEmail reports whether email notifications are configured.
-func (s *Snapshot) HasEmail() bool {
-	return s.EmailSMTPHost != "" && s.EmailRecipients != ""
+// HasGraph reports whether Microsoft Graph email notifications are configured.
+func (s *Snapshot) HasGraph() bool {
+	return s.GraphTenantID != "" && s.GraphClientID != "" && s.GraphClientSecret != "" &&
+		s.GraphFromAddress != "" && s.GraphRecipients != ""
 }
 
 // HasLogPath reports whether a log path is configured.

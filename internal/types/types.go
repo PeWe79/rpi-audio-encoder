@@ -271,11 +271,11 @@ type WSStatusResponse struct {
 	SilenceRecoveryMs int64                    `json:"silence_recovery_ms"` // Recovery duration in milliseconds
 	SilenceWebhook    string                   `json:"silence_webhook"`     // Webhook URL for alerts
 	SilenceLogPath    string                   `json:"silence_log_path"`    // Log file path
-	EmailSMTPHost     string                   `json:"email_smtp_host"`     // SMTP server hostname
-	EmailSMTPPort     int                      `json:"email_smtp_port"`     // SMTP server port
-	EmailFromName     string                   `json:"email_from_name"`     // Sender display name
-	EmailUsername     string                   `json:"email_username"`      // SMTP username
-	EmailRecipients   string                   `json:"email_recipients"`    // Comma-separated recipients
+	GraphTenantID     string                   `json:"graph_tenant_id"`     // Azure AD tenant ID
+	GraphClientID     string                   `json:"graph_client_id"`     // App registration client ID
+	GraphFromAddress  string                   `json:"graph_from_address"`  // Shared mailbox address
+	GraphRecipients   string                   `json:"graph_recipients"`    // Comma-separated recipients
+	GraphSecretExpiry SecretExpiryInfo         `json:"graph_secret_expiry"` // Client secret expiration info
 	Settings          WSSettings               `json:"settings"`            // Current settings
 	Version           VersionInfo              `json:"version"`             // Version information
 }
@@ -323,14 +323,21 @@ type AudioDevice struct {
 	Name string `json:"name"` // Device display name
 }
 
-// EmailConfig contains SMTP server settings for email notifications.
-type EmailConfig struct {
-	Host       string `json:"host,omitempty"`       // SMTP server hostname
-	Port       int    `json:"port,omitempty"`       // SMTP server port
-	FromName   string `json:"from_name,omitempty"`  // Sender display name
-	Username   string `json:"username,omitempty"`   // SMTP username
-	Password   string `json:"password,omitempty"`   // SMTP password
-	Recipients string `json:"recipients,omitempty"` // Comma-separated recipients
+// GraphConfig contains Microsoft Graph API settings for email notifications.
+type GraphConfig struct {
+	TenantID     string `json:"tenant_id,omitempty"`     // Azure AD tenant ID
+	ClientID     string `json:"client_id,omitempty"`     // App registration client ID
+	ClientSecret string `json:"client_secret,omitempty"` // App registration client secret
+	FromAddress  string `json:"from_address,omitempty"`  // Shared mailbox address (sender)
+	Recipients   string `json:"recipients,omitempty"`    // Comma-separated recipients
+}
+
+// SecretExpiryInfo contains client secret expiration data.
+type SecretExpiryInfo struct {
+	ExpiresAt   string `json:"expires_at,omitempty"`   // RFC3339 expiration timestamp
+	ExpiresSoon bool   `json:"expires_soon,omitempty"` // True if expires within 30 days
+	DaysLeft    int    `json:"days_left,omitempty"`    // Days until expiration
+	Error       string `json:"error,omitempty"`        // Error message if check failed
 }
 
 // VersionInfo contains version comparison data.

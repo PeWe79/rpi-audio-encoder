@@ -123,6 +123,7 @@ func readSilenceLog(logPath string, maxEntries int) ([]types.SilenceLogEntry, er
 		}
 		var entry types.SilenceLogEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			slog.Warn("failed to parse silence log entry", "line", line, "error", err)
 			continue // Skip malformed entries
 		}
 		entries = append(entries, entry)

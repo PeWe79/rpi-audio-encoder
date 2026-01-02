@@ -37,38 +37,44 @@ var (
 
 // Encoder manages audio capture and distribution to multiple streaming outputs.
 type Encoder struct {
-	config           *config.Config
-	ffmpegPath       string
-	outputManager    *output.Manager
-	recordingManager *recording.Manager
-	sourceCmd        *exec.Cmd
-	sourceCancel     context.CancelFunc
-	sourceStdout     io.ReadCloser
-	state            types.EncoderState
-	stopChan         chan struct{}
-	mu               sync.RWMutex
-	lastError        string
-	startTime        time.Time
-	retryCount       int
-	backoff          *util.Backoff
-	audioLevels      types.AudioLevels
-	lastKnownLevels  types.AudioLevels // Cache for TryRLock fallback
-	silenceDetect    *audio.SilenceDetector
-	silenceNotifier  *notify.SilenceNotifier
-	peakHolder       *audio.PeakHolder
+	config              *config.Config
+	ffmpegPath          string
+	outputManager       *output.Manager
+	recordingManager    *recording.Manager
+	sourceCmd           *exec.Cmd
+	sourceCancel        context.CancelFunc
+	sourceStdout        io.ReadCloser
+	state               types.EncoderState
+	stopChan            chan struct{}
+	mu                  sync.RWMutex
+	lastError           string
+	startTime           time.Time
+	retryCount          int
+	backoff             *util.Backoff
+	audioLevels         types.AudioLevels
+	lastKnownLevels     types.AudioLevels // Cache for TryRLock fallback
+	silenceDetect       *audio.SilenceDetector
+	silenceNotifier     *notify.SilenceNotifier
+	peakHolder          *audio.PeakHolder
+	secretExpiryChecker *notify.SecretExpiryChecker
 }
 
 // New creates a new Encoder with the given configuration and FFmpeg binary path.
 func New(cfg *config.Config, ffmpegPath string) *Encoder {
+	graphCfg := cfg.GraphConfig()
+	expiryChecker := notify.NewSecretExpiryChecker(&graphCfg)
+	expiryChecker.Start()
+
 	return &Encoder{
-		config:          cfg,
-		ffmpegPath:      ffmpegPath,
-		outputManager:   output.NewManager(ffmpegPath),
-		state:           types.StateStopped,
-		backoff:         util.NewBackoff(types.InitialRetryDelay, types.MaxRetryDelay),
-		silenceDetect:   audio.NewSilenceDetector(),
-		silenceNotifier: notify.NewSilenceNotifier(cfg),
-		peakHolder:      audio.NewPeakHolder(),
+		config:              cfg,
+		ffmpegPath:          ffmpegPath,
+		outputManager:       output.NewManager(ffmpegPath),
+		state:               types.StateStopped,
+		backoff:             util.NewBackoff(types.InitialRetryDelay, types.MaxRetryDelay),
+		silenceDetect:       audio.NewSilenceDetector(),
+		silenceNotifier:     notify.NewSilenceNotifier(cfg),
+		peakHolder:          audio.NewPeakHolder(),
+		secretExpiryChecker: expiryChecker,
 	}
 }
 
@@ -214,6 +220,11 @@ func (e *Encoder) Start() error {
 	e.silenceNotifier.Reset()
 	e.peakHolder.Reset()
 
+	// Restart the secret expiry checker if it was stopped
+	if e.secretExpiryChecker != nil {
+		e.secretExpiryChecker.Start()
+	}
+
 	go e.runSourceLoop()
 
 	return nil
@@ -283,6 +294,11 @@ func (e *Encoder) Stop() error {
 	e.sourceCancel = nil
 	e.mu.Unlock()
 
+	// Stop the secret expiry checker goroutine
+	if e.secretExpiryChecker != nil {
+		e.secretExpiryChecker.Stop()
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -335,10 +351,33 @@ func (e *Encoder) ClearOutputError(outputID string) {
 	e.outputManager.ClearError(outputID)
 }
 
-// TriggerTestEmail sends a test email to verify configuration.
+// TriggerTestEmail sends a test email to verify Microsoft Graph configuration.
 func (e *Encoder) TriggerTestEmail() error {
 	cfg := e.config.Snapshot()
-	return notify.SendTestEmail(notify.BuildEmailConfig(cfg), cfg.StationName)
+	return notify.SendTestEmail(notify.BuildGraphConfig(cfg), cfg.StationName)
+}
+
+// GraphSecretExpiry returns the current Graph API client secret expiry info.
+func (e *Encoder) GraphSecretExpiry() types.SecretExpiryInfo {
+	if e.secretExpiryChecker == nil {
+		return types.SecretExpiryInfo{}
+	}
+	return e.secretExpiryChecker.GetInfo()
+}
+
+// UpdateGraphConfig notifies the encoder that Graph configuration has changed.
+// This invalidates cached clients and triggers a re-check of secret expiry.
+func (e *Encoder) UpdateGraphConfig() {
+	// Invalidate cached Graph client in silence notifier
+	if e.silenceNotifier != nil {
+		e.silenceNotifier.InvalidateGraphClient()
+	}
+
+	// Update expiry checker with new config
+	if e.secretExpiryChecker != nil {
+		graphCfg := e.config.GraphConfig()
+		e.secretExpiryChecker.UpdateConfig(&graphCfg)
+	}
 }
 
 // TriggerTestWebhook sends a test webhook to verify configuration.

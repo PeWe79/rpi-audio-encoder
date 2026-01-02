@@ -3,19 +3,17 @@ package notify
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
-	"github.com/wneessen/go-mail"
 )
 
-// EmailConfig is the SMTP configuration for email notifications.
-type EmailConfig = types.EmailConfig
+// GraphConfig is the Microsoft Graph configuration for email notifications.
+type GraphConfig = types.GraphConfig
 
-// SendSilenceAlert sends an email notification for critical silence.
-func SendSilenceAlert(cfg *EmailConfig, stationName string, durationMs int64, threshold float64) error {
-	if !util.IsConfigured(cfg.Host, cfg.Username, cfg.Recipients) {
+// SendSilenceAlert sends an email notification for critical silence via Microsoft Graph.
+func SendSilenceAlert(cfg *GraphConfig, stationName string, durationMs int64, threshold float64) error {
+	if !IsConfigured(cfg) {
 		return nil // Silently skip if not configured
 	}
 
@@ -32,9 +30,9 @@ func SendSilenceAlert(cfg *EmailConfig, stationName string, durationMs int64, th
 	return sendEmail(cfg, subject, body)
 }
 
-// SendRecoveryAlert sends an email notification when audio recovers from silence.
-func SendRecoveryAlert(cfg *EmailConfig, stationName string, silenceDurationMs int64) error {
-	if !util.IsConfigured(cfg.Host, cfg.Username, cfg.Recipients) {
+// SendRecoveryAlert sends an email notification when audio recovers from silence via Microsoft Graph.
+func SendRecoveryAlert(cfg *GraphConfig, stationName string, silenceDurationMs int64) error {
+	if !IsConfigured(cfg) {
 		return nil // Silently skip if not configured
 	}
 
@@ -49,81 +47,53 @@ func SendRecoveryAlert(cfg *EmailConfig, stationName string, silenceDurationMs i
 	return sendEmail(cfg, subject, body)
 }
 
-// SendTestEmail sends a test email to verify SMTP configuration.
-func SendTestEmail(cfg *EmailConfig, stationName string) error {
-	if cfg.Host == "" {
-		return fmt.Errorf("SMTP host not configured")
+// SendTestEmail sends a test email to verify Microsoft Graph configuration.
+// This function first validates authentication before sending the test email.
+func SendTestEmail(cfg *GraphConfig, stationName string) error {
+	if err := ValidateConfig(cfg); err != nil {
+		return fmt.Errorf("configuration error: %w", err)
 	}
-	if cfg.Username == "" {
-		return fmt.Errorf("email username not configured")
+
+	client, err := NewGraphClient(cfg)
+	if err != nil {
+		return fmt.Errorf("create Graph client: %w", err)
 	}
-	if cfg.Recipients == "" {
-		return fmt.Errorf("email recipients not configured")
+
+	// Validate authentication first
+	if err := client.ValidateAuth(); err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
 	}
 
 	subject := "[TEST] " + stationName
 	body := fmt.Sprintf(
 		"Test email from the audio encoder.\n\n"+
 			"Time: %s\n\n"+
-			"SMTP configuration is working correctly.",
+			"Microsoft Graph configuration is working correctly.",
 		util.HumanTime(),
 	)
 
-	return sendEmail(cfg, subject, body)
+	recipients := ParseRecipients(cfg.Recipients)
+	if err := client.SendMail(recipients, subject, body); err != nil {
+		return fmt.Errorf("send email: %w", err)
+	}
+
+	return nil
 }
 
-// sendEmail delivers an email message to configured recipients.
-func sendEmail(cfg *EmailConfig, subject, body string) error {
-	var recipients []string
-	for _, r := range strings.Split(cfg.Recipients, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			recipients = append(recipients, r)
-		}
+// sendEmail delivers an email message to configured recipients via Microsoft Graph.
+func sendEmail(cfg *GraphConfig, subject, body string) error {
+	client, err := NewGraphClient(cfg)
+	if err != nil {
+		return util.WrapError("create Graph client", err)
 	}
+
+	recipients := ParseRecipients(cfg.Recipients)
 	if len(recipients) == 0 {
 		return fmt.Errorf("no valid recipients")
 	}
 
-	m := mail.NewMsg()
-	if cfg.FromName != "" {
-		if err := m.FromFormat(cfg.FromName, cfg.Username); err != nil {
-			return util.WrapError("set from address", err)
-		}
-	} else {
-		if err := m.From(cfg.Username); err != nil {
-			return util.WrapError("set from address", err)
-		}
-	}
-	if err := m.To(recipients...); err != nil {
-		return util.WrapError("set recipient address", err)
-	}
-	m.Subject(subject)
-	m.SetBodyString(mail.TypeTextPlain, body)
-
-	// Build client options with port-appropriate TLS settings
-	opts := []mail.Option{
-		mail.WithPort(cfg.Port),
-		mail.WithSMTPAuth(mail.SMTPAuthAutoDiscover),
-		mail.WithUsername(cfg.Username),
-		mail.WithPassword(cfg.Password),
-	}
-
-	switch cfg.Port {
-	case 465: // SMTPS - implicit TLS
-		opts = append(opts, mail.WithSSL())
-	case 587: // Submission - STARTTLS required
-		opts = append(opts, mail.WithTLSPortPolicy(mail.TLSMandatory))
-	default: // Port 25 or custom - opportunistic TLS
-		opts = append(opts, mail.WithTLSPortPolicy(mail.TLSOpportunistic))
-	}
-
-	c, err := mail.NewClient(cfg.Host, opts...)
-	if err != nil {
-		return util.WrapError("create SMTP client", err)
-	}
-
-	if err := c.DialAndSend(m); err != nil {
-		return util.WrapError("send email", err)
+	if err := client.SendMail(recipients, subject, body); err != nil {
+		return util.WrapError("send email via Graph", err)
 	}
 
 	return nil
