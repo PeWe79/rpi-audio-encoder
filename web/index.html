@@ -406,39 +406,40 @@
                     <div class="section">
                         <div class="section-header">
                             <span class="icon-container" x-html="icons.email"></span>
-                            <h3>Email Notifications</h3>
+                            <h3>Microsoft 365 Email</h3>
                         </div>
-                        <p class="section-desc">Email notifications when silence is detected.</p>
+                        <p class="section-desc">Email notifications via Microsoft Graph API when silence is detected.</p>
+                        <template x-if="graphSecretExpiry.expires_soon">
+                            <div class="warning-banner">
+                                <span x-html="icons.warning"></span>
+                                <span>Client secret expires in <strong x-text="graphSecretExpiry.days_left"></strong> days. Regenerate in Azure Portal.</span>
+                            </div>
+                        </template>
                         <div class="form">
                             <div class="row">
                                 <div class="group">
-                                    <label for="email-smtp-host">SMTP Host</label>
-                                    <input id="email-smtp-host" type="text" placeholder="smtp.example.com" x-model="settings.email.host" @input="markSettingsDirty()">
+                                    <label for="graph-tenant-id">Tenant ID</label>
+                                    <input id="graph-tenant-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" x-model="settings.graph.tenantId" @input="markSettingsDirty()">
                                 </div>
                                 <div class="group">
-                                    <label for="email-smtp-port">Port</label>
-                                    <input id="email-smtp-port" type="number" max="65535" min="1" x-model.number="settings.email.port" @input="markSettingsDirty()">
-                                </div>
-                            </div>
-                            <div class="row">
-                                <div class="group">
-                                    <label for="email-from-name">Sender Name</label>
-                                    <input id="email-from-name" type="text" placeholder="{{.StationName}}" x-model="settings.email.fromName" @input="markSettingsDirty()">
-                                </div>
-                                <div class="group">
-                                    <label for="email-username">Username</label>
-                                    <input id="email-username" type="email" placeholder="alerts@example.com" x-model="settings.email.username" @input="markSettingsDirty()">
+                                    <label for="graph-client-id">Client ID</label>
+                                    <input id="graph-client-id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" x-model="settings.graph.clientId" @input="markSettingsDirty()">
                                 </div>
                             </div>
                             <div class="group">
-                                <label for="email-password">Password</label>
-                                <input id="email-password" type="password" placeholder="SMTP password" x-model="settings.email.password" @input="markSettingsDirty()" aria-describedby="email-password-hint">
-                                <span id="email-password-hint" class="input-hint">Leave empty to keep existing password</span>
+                                <label for="graph-client-secret">Client Secret</label>
+                                <input id="graph-client-secret" type="password" placeholder="Azure AD client secret" x-model="settings.graph.clientSecret" @input="markSettingsDirty()" aria-describedby="graph-secret-hint">
+                                <span id="graph-secret-hint" class="input-hint">Leave empty to keep existing secret</span>
                             </div>
                             <div class="group">
-                                <label for="email-recipients">Recipients</label>
-                                <input id="email-recipients" type="text" placeholder="admin@example.com, tech@example.com" x-model="settings.email.recipients" @input="markSettingsDirty()" aria-describedby="email-recipients-hint">
-                                <span id="email-recipients-hint" class="input-hint">Comma-separated email addresses.</span>
+                                <label for="graph-from-address">From Address (Shared Mailbox)</label>
+                                <input id="graph-from-address" type="email" placeholder="alerts@company.com" x-model="settings.graph.fromAddress" @input="markSettingsDirty()" aria-describedby="graph-from-hint">
+                                <span id="graph-from-hint" class="input-hint">Shared mailbox that will send the emails</span>
+                            </div>
+                            <div class="group">
+                                <label for="graph-recipients">Recipients</label>
+                                <input id="graph-recipients" type="text" placeholder="admin@company.com, tech@company.com" x-model="settings.graph.recipients" @input="markSettingsDirty()" aria-describedby="graph-recipients-hint">
+                                <span id="graph-recipients-hint" class="input-hint">Comma-separated email addresses.</span>
                             </div>
                         </div>
                         <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0" @click="sendTest('email')" :disabled="testStates.email.pending || settingsDirty" x-text="testStates.email.text">Test</button>

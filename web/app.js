@@ -33,7 +33,7 @@ const DB_MINIMUM = -60;           // Minimum dB level for VU meter range
 const DB_RANGE = 60;              // dB range (0 to -60)
 const CLIP_TIMEOUT_MS = 1500;     // Peak hold / clip indicator timeout
 const WS_RECONNECT_MS = 1000;     // WebSocket reconnection delay
-const EMAIL_FEEDBACK_MS = 2000;   // Email test result display duration
+const TEST_FEEDBACK_MS = 2000;    // Test result display duration
 const API_KEY_LENGTH = 32;        // Length of generated API keys
 const API_KEY_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
@@ -184,12 +184,14 @@ document.addEventListener('alpine:init', () => {
             silenceRecovery: 5,
             silenceWebhook: '',
             silenceLogPath: '',
-            email: { host: '', port: 587, fromName: '', username: '', password: '', recipients: '' },
+            graph: { tenantId: '', clientId: '', clientSecret: '', fromAddress: '', recipients: '' },
             recordingApiKey: '',
             platform: ''
         },
         originalSettings: null,
         settingsDirty: false,
+
+        graphSecretExpiry: { expires_at: '', expires_soon: false, days_left: 0, error: '' },
 
         version: { current: '', latest: '', updateAvail: false, commit: '', build_time: '' },
 
@@ -585,12 +587,13 @@ document.addEventListener('alpine:init', () => {
                 this.settings.silenceRecovery = msToSeconds(msg.silence_recovery_ms ?? 5000);
                 this.settings.silenceWebhook = msg.silence_webhook ?? '';
                 this.settings.silenceLogPath = msg.silence_log_path ?? '';
-                // Email settings
-                this.settings.email.host = msg.email_smtp_host ?? '';
-                this.settings.email.port = msg.email_smtp_port ?? 587;
-                this.settings.email.fromName = msg.email_from_name ?? '';
-                this.settings.email.username = msg.email_username ?? '';
-                this.settings.email.recipients = msg.email_recipients ?? '';
+                // Microsoft Graph settings
+                this.settings.graph.tenantId = msg.graph_tenant_id ?? '';
+                this.settings.graph.clientId = msg.graph_client_id ?? '';
+                this.settings.graph.fromAddress = msg.graph_from_address ?? '';
+                this.settings.graph.recipients = msg.graph_recipients ?? '';
+                // Update secret expiry info
+                this.graphSecretExpiry = msg.graph_secret_expiry ?? { expires_at: '', expires_soon: false, days_left: 0, error: '' };
             }
 
             if (msg.version) {
@@ -621,7 +624,7 @@ document.addEventListener('alpine:init', () => {
 
         /**
          * Handles notification test result from backend.
-         * Updates UI feedback and auto-clears after EMAIL_FEEDBACK_MS.
+         * Updates UI feedback and auto-clears after TEST_FEEDBACK_MS.
          *
          * @param {Object} msg - Result with test_type, success, and optional error
          */
@@ -635,7 +638,7 @@ document.addEventListener('alpine:init', () => {
                 const typeName = type.charAt(0).toUpperCase() + type.slice(1);
                 this.showBanner(`${typeName} test failed: ${msg.error || 'Unknown error'}`, 'danger', false);
             }
-            setTimeout(() => { this.testStates[type].text = 'Test'; }, EMAIL_FEEDBACK_MS);
+            setTimeout(() => { this.testStates[type].text = 'Test'; }, TEST_FEEDBACK_MS);
         },
 
         // Navigation
@@ -710,15 +713,14 @@ document.addEventListener('alpine:init', () => {
                 silence_recovery: this.settings.silenceRecovery,
                 silence_webhook: this.settings.silenceWebhook,
                 silence_log_path: this.settings.silenceLogPath,
-                email_smtp_host: this.settings.email.host,
-                email_smtp_port: this.settings.email.port,
-                email_from_name: this.settings.email.fromName,
-                email_username: this.settings.email.username,
-                email_recipients: this.settings.email.recipients
+                graph_tenant_id: this.settings.graph.tenantId,
+                graph_client_id: this.settings.graph.clientId,
+                graph_from_address: this.settings.graph.fromAddress,
+                graph_recipients: this.settings.graph.recipients
             };
-            // Only include password if it was changed
-            if (this.settings.email.password) {
-                update.email_password = this.settings.email.password;
+            // Only include client secret if it was changed
+            if (this.settings.graph.clientSecret) {
+                update.graph_client_secret = this.settings.graph.clientSecret;
             }
             // Only include API key if it changed from original
             if (this.settings.recordingApiKey !== this.originalSettings?.recordingApiKey) {
@@ -1158,7 +1160,7 @@ document.addEventListener('alpine:init', () => {
 
             setTimeout(() => {
                 this.testStates.recorderS3.text = 'Test Connection';
-            }, EMAIL_FEEDBACK_MS);
+            }, TEST_FEEDBACK_MS);
         },
 
         /**

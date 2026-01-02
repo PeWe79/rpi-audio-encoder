@@ -79,10 +79,32 @@ Monitors audio levels and sends alerts when silence is detected or recovered. Us
 
 **Alerting options** (can use multiple simultaneously):
 - **Webhook** - POST request to a URL on silence start and recovery
-- **Email** - SMTP notification to configured recipients on silence start and recovery
+- **Email** - Microsoft Graph API notification to configured recipients on silence start and recovery
 - **File Log** - Append JSON Lines to a local file for each silence event
 
 Configure via the web interface under Settings → Alerts.
+
+### Microsoft 365 Email Setup
+
+Email notifications are sent via Microsoft Graph API using Client Credentials flow (app-only authentication).
+
+**Azure AD Setup:**
+1. Create an App Registration in Azure Portal
+2. Add API Permissions: `Mail.Send` (Application) + `Application.Read.All` (Application, for secret expiry warnings)
+3. Grant admin consent for the permissions
+4. Create a Client Secret and note the expiration date
+5. Create or use an existing Shared Mailbox (e.g., `alerts@yourcompany.com`)
+
+**Required Configuration:**
+| Field | Description |
+|-------|-------------|
+| Tenant ID | Your Azure AD tenant ID (GUID) |
+| Client ID | App registration client ID (GUID) |
+| Client Secret | App registration client secret |
+| From Address | Shared mailbox email address |
+| Recipients | Comma-separated list of recipient email addresses |
+
+The encoder will display a warning banner when the client secret is expiring within 30 days.
 
 ## Configuration
 
@@ -111,12 +133,11 @@ Configuration is stored in `/etc/encoder/config.json` on production systems. For
   "notifications": {
     "webhook_url": "https://example.com/alert",
     "log_path": "/var/log/encoder/silence.jsonl",
-    "email": {
-      "host": "smtp.example.com",
-      "port": 587,
-      "from_name": "ZuidWest FM Encoder",
-      "username": "alerts@example.com",
-      "password": "secret",
+    "graph": {
+      "tenant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "client_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "client_secret": "your-client-secret",
+      "from_address": "alerts@yourcompany.com",
       "recipients": "admin@example.com, tech@example.com"
     }
   },
@@ -180,12 +201,11 @@ Choose accent colors that contrast well with the interface background in each mo
 |---------|---------|-------------|
 | `notifications.webhook_url` | — | URL for POST requests on silence events |
 | `notifications.log_path` | — | Path to JSON Lines log file |
-| `notifications.email.host` | — | SMTP server hostname |
-| `notifications.email.port` | 587 | SMTP server port |
-| `notifications.email.from_name` | *(station name)* | Sender display name |
-| `notifications.email.username` | — | SMTP authentication username |
-| `notifications.email.password` | — | SMTP authentication password |
-| `notifications.email.recipients` | — | Comma-separated email addresses |
+| `notifications.graph.tenant_id` | — | Azure AD tenant ID |
+| `notifications.graph.client_id` | — | Azure AD app registration client ID |
+| `notifications.graph.client_secret` | — | Azure AD app registration client secret |
+| `notifications.graph.from_address` | — | Shared mailbox email address (sender) |
+| `notifications.graph.recipients` | — | Comma-separated email addresses |
 
 #### Outputs
 

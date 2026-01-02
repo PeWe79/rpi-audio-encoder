@@ -42,7 +42,7 @@ func (n *SilenceNotifier) handleSilenceStart(durationMs int64) {
 	cfg := n.cfg.Snapshot()
 
 	n.trySend(&n.webhookSent, cfg.HasWebhook(), func() { n.sendSilenceWebhook(cfg, durationMs) })
-	n.trySend(&n.emailSent, cfg.HasEmail(), func() { n.sendSilenceEmail(cfg, durationMs) })
+	n.trySend(&n.emailSent, cfg.HasGraph(), func() { n.sendSilenceEmail(cfg, durationMs) })
 	n.trySend(&n.logSent, cfg.HasLogPath(), func() { n.logSilenceStart(cfg) })
 }
 
@@ -112,34 +112,33 @@ func (n *SilenceNotifier) sendRecoveryWebhook(cfg config.Snapshot, durationMs in
 	)
 }
 
-// BuildEmailConfig creates an EmailConfig from the config snapshot.
+// BuildGraphConfig creates a GraphConfig from the config snapshot.
 //
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func BuildEmailConfig(cfg config.Snapshot) *EmailConfig {
-	return &EmailConfig{
-		Host:       cfg.EmailSMTPHost,
-		Port:       cfg.EmailSMTPPort,
-		FromName:   cfg.EmailFromName,
-		Username:   cfg.EmailUsername,
-		Password:   cfg.EmailPassword,
-		Recipients: cfg.EmailRecipients,
+func BuildGraphConfig(cfg config.Snapshot) *GraphConfig {
+	return &GraphConfig{
+		TenantID:     cfg.GraphTenantID,
+		ClientID:     cfg.GraphClientID,
+		ClientSecret: cfg.GraphClientSecret,
+		FromAddress:  cfg.GraphFromAddress,
+		Recipients:   cfg.GraphRecipients,
 	}
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
 func (n *SilenceNotifier) sendSilenceEmail(cfg config.Snapshot, durationMs int64) {
-	emailCfg := BuildEmailConfig(cfg)
+	graphCfg := BuildGraphConfig(cfg)
 	util.LogNotifyResult(
-		func() error { return SendSilenceAlert(emailCfg, cfg.StationName, durationMs, cfg.SilenceThreshold) },
+		func() error { return SendSilenceAlert(graphCfg, cfg.StationName, durationMs, cfg.SilenceThreshold) },
 		"Silence email",
 	)
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
 func (n *SilenceNotifier) sendRecoveryEmail(cfg config.Snapshot, durationMs int64) {
-	emailCfg := BuildEmailConfig(cfg)
+	graphCfg := BuildGraphConfig(cfg)
 	util.LogNotifyResult(
-		func() error { return SendRecoveryAlert(emailCfg, cfg.StationName, durationMs) },
+		func() error { return SendRecoveryAlert(graphCfg, cfg.StationName, durationMs) },
 		"Recovery email",
 	)
 }

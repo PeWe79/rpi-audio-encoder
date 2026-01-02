@@ -6,6 +6,7 @@ GITHUB_REPO="oszuidwest/zwfm-encoder"
 ENCODER_SERVICE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/encoder.service"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/encoder"
+CONFIG_FILE="${CONFIG_DIR}/config.json"
 SERVICE_PATH="/etc/systemd/system/encoder.service"
 
 # Functions library
@@ -16,7 +17,7 @@ FUNCTIONS_LIB_URL="https://raw.githubusercontent.com/oszuidwest/bash-functions/m
 trap 'rm -f "$FUNCTIONS_LIB_PATH"' EXIT
 
 # General Raspberry Pi configuration
-CONFIG_FILE_PATHS=("/boot/firmware/config.txt" "/boot/config.txt")
+CONFIG_TXT_PATHS=("/boot/firmware/config.txt" "/boot/config.txt")
 FIRST_IP=$(hostname -I | awk '{print $1}')
 
 # Start with a clean terminal
@@ -39,16 +40,16 @@ is_this_linux
 is_this_os_64bit
 check_rpi_model 4
 
-# Determine the correct config file path
-CONFIG_FILE=""
-for path in "${CONFIG_FILE_PATHS[@]}"; do
+# Determine the correct config.txt path
+CONFIG_TXT=""
+for path in "${CONFIG_TXT_PATHS[@]}"; do
   if [ -f "$path" ]; then
-    CONFIG_FILE="$path"
+    CONFIG_TXT="$path"
     break
   fi
 done
 
-if [ -z "$CONFIG_FILE" ]; then
+if [ -z "$CONFIG_TXT" ]; then
   echo -e "${RED}Error: config.txt not found in known locations.${NC}"
   exit 1
 fi
@@ -70,15 +71,65 @@ EOF
 echo -e "${GREEN}⎎ Audio encoder set-up for Raspberry Pi${NC}\n"
 
 # Check if the HiFiBerry is configured
-if ! grep -q "^dtoverlay=hifiberry" "$CONFIG_FILE"; then
-  echo -e "${RED}No HiFiBerry card configured in the $CONFIG_FILE file. Exiting...${NC}\n" >&2
+if ! grep -q "^dtoverlay=hifiberry" "$CONFIG_TXT"; then
+  echo -e "${RED}No HiFiBerry card configured in the $CONFIG_TXT file. Exiting...${NC}\n" >&2
   exit 1
 fi
 
-# Ask for OS updates
+# =============================================================================
+# CONFIGURATION QUESTIONS (all upfront)
+# =============================================================================
+
+echo -e "${BLUE}►► Configuration${NC}\n"
+
+# Station name
+while true; do
+  read -r -p "Enter your station name: " STATION_NAME < /dev/tty
+  if [[ -n "$STATION_NAME" ]]; then
+    break
+  fi
+  echo "Station name cannot be empty."
+done
+
+# Web username
+while true; do
+  read -r -p "Enter the web interface username: " WEB_USERNAME < /dev/tty
+  if [[ -n "$WEB_USERNAME" ]]; then
+    break
+  fi
+  echo "Username cannot be empty."
+done
+
+# Web password (silent input)
+while true; do
+  read -r -s -p "Enter the web interface password: " WEB_PASSWORD < /dev/tty
+  echo
+  if [[ -n "$WEB_PASSWORD" ]]; then
+    break
+  fi
+  echo "Password cannot be empty."
+done
+
+# Web port
+while true; do
+  read -r -p "Enter the web interface port [default: 8080]: " WEB_PORT < /dev/tty
+  WEB_PORT="${WEB_PORT:-8080}"
+  if [[ "$WEB_PORT" =~ ^[0-9]+$ ]]; then
+    break
+  fi
+  echo "Port must be a number."
+done
+
+# Timezone
+read -r -p "Enter your timezone [default: Europe/Amsterdam]: " TIMEZONE < /dev/tty
+TIMEZONE="${TIMEZONE:-Europe/Amsterdam}"
+
+echo ""
+
+# OS updates
 ask_user "DO_UPDATES" "y" "Do you want to perform all OS updates? (y/n)" "y/n"
 
-# Ask for heartbeat monitoring (read from /dev/tty to work with bash -c)
+# Heartbeat monitoring
 ENABLE_HEARTBEAT="n"
 while true; do
   read -r -p "Do you want to enable heartbeat monitoring via UptimeRobot? (y/n) [default: n]: " answer < /dev/tty
@@ -90,6 +141,7 @@ while true; do
   echo "Invalid input. Please enter 'y' or 'n'."
 done
 
+HEARTBEAT_URL=""
 if [ "$ENABLE_HEARTBEAT" == "y" ]; then
   while true; do
     read -r -p "Enter the heartbeat URL to ping every minute: " HEARTBEAT_URL < /dev/tty
@@ -100,7 +152,7 @@ if [ "$ENABLE_HEARTBEAT" == "y" ]; then
   done
 fi
 
-# Ask for beta version installation
+# Beta version
 INSTALL_BETA="n"
 while true; do
   read -r -p "Do you want to install a beta/prerelease version? (y/n) [default: n]: " answer < /dev/tty
@@ -112,17 +164,55 @@ while true; do
   echo "Invalid input. Please enter 'y' or 'n'."
 done
 
-# Timezone configuration
-set_timezone Europe/Amsterdam
+# =============================================================================
+# SUMMARY AND CONFIRMATION
+# =============================================================================
+
+echo -e "\n${BLUE}►► Installation Summary${NC}\n"
+echo -e "Station name:     ${BOLD}${STATION_NAME}${NC}"
+echo -e "Web username:     ${BOLD}${WEB_USERNAME}${NC}"
+echo -e "Web password:     ${BOLD}********${NC}"
+echo -e "Web port:         ${BOLD}${WEB_PORT}${NC}"
+echo -e "Timezone:         ${BOLD}${TIMEZONE}${NC}"
+echo -e "OS updates:       ${BOLD}${DO_UPDATES}${NC}"
+echo -e "Heartbeat:        ${BOLD}${ENABLE_HEARTBEAT}${NC}"
+if [ "$ENABLE_HEARTBEAT" == "y" ]; then
+  echo -e "Heartbeat URL:    ${BOLD}${HEARTBEAT_URL}${NC}"
+fi
+echo -e "Beta version:     ${BOLD}${INSTALL_BETA}${NC}"
+echo -e "Config location:  ${BOLD}${CONFIG_FILE}${NC}"
+
+echo ""
+while true; do
+  read -r -p "Continue with installation? (y/n): " CONFIRM < /dev/tty
+  if [[ "$CONFIRM" =~ ^[yn]$ ]]; then
+    break
+  fi
+  echo "Invalid input. Please enter 'y' or 'n'."
+done
+
+if [ "$CONFIRM" != "y" ]; then
+  echo -e "${YELLOW}Installation cancelled.${NC}"
+  exit 0
+fi
+
+# =============================================================================
+# INSTALLATION
+# =============================================================================
+
+echo -e "\n${BLUE}►► Starting installation...${NC}\n"
+
+# Set timezone
+set_timezone "$TIMEZONE"
 
 # Run OS updates if requested
 if [ "$DO_UPDATES" == "y" ]; then
   update_os silent
 fi
 
-# Install dependencies
-echo -e "${BLUE}►► Installing FFmpeg and alsa-utils...${NC}"
-install_packages silent ffmpeg alsa-utils
+# Install dependencies (including jq for config generation)
+echo -e "${BLUE}►► Installing FFmpeg, alsa-utils, and jq...${NC}"
+install_packages silent ffmpeg alsa-utils jq
 
 # Stop existing service if running
 if systemctl is-active --quiet encoder 2>/dev/null; then
@@ -184,22 +274,50 @@ mkdir -p "$CONFIG_DIR"
 chown encoder:encoder "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
-# Note: Log directory /var/log/encoder is managed by systemd via LogsDirectory=
-
 # Migrate config from old location if it exists
 OLD_CONFIG="${INSTALL_DIR}/config.json"
-NEW_CONFIG="${CONFIG_DIR}/config.json"
-if [ -f "$OLD_CONFIG" ] && [ ! -f "$NEW_CONFIG" ]; then
+if [ -f "$OLD_CONFIG" ] && [ ! -f "$CONFIG_FILE" ]; then
   echo -e "${BLUE}►► Migrating config from old location...${NC}"
-  mv "$OLD_CONFIG" "$NEW_CONFIG"
-  echo -e "${GREEN}✓ Config migrated to ${NEW_CONFIG}${NC}"
+  mv "$OLD_CONFIG" "$CONFIG_FILE"
+  echo -e "${GREEN}✓ Config migrated to ${CONFIG_FILE}${NC}"
 fi
 
-# Ensure config file has correct ownership
-if [ -f "$NEW_CONFIG" ]; then
-  chown encoder:encoder "$NEW_CONFIG"
-  chmod 600 "$NEW_CONFIG"
+# Backup existing config if present
+if [ -f "$CONFIG_FILE" ]; then
+  echo -e "${BLUE}►► Backing up existing configuration...${NC}"
+  backup_file "$CONFIG_FILE"
+  echo -e "${GREEN}✓ Backup created${NC}"
 fi
+
+# Generate configuration file using jq
+echo -e "${BLUE}►► Generating configuration file...${NC}"
+jq -n \
+  --arg station_name "$STATION_NAME" \
+  --arg username "$WEB_USERNAME" \
+  --arg password "$WEB_PASSWORD" \
+  --argjson port "$WEB_PORT" \
+  '{
+    station: {
+      name: $station_name,
+      color_light: "#E6007E",
+      color_dark: "#E6007E"
+    },
+    web: {
+      port: $port,
+      username: $username,
+      password: $password
+    },
+    audio: {
+      input: ""
+    },
+    outputs: [],
+    recorders: []
+  }' > "$CONFIG_FILE"
+
+# Set proper ownership and permissions
+chown encoder:encoder "$CONFIG_FILE"
+chmod 600 "$CONFIG_FILE"
+echo -e "${GREEN}✓ Configuration saved to ${CONFIG_FILE}${NC}"
 
 # Download and install systemd service
 echo -e "${BLUE}►► Installing systemd service...${NC}"
@@ -221,7 +339,8 @@ sleep 2
 
 # Verify installation
 if ! systemctl is-active --quiet encoder; then
-  echo -e "${RED}Warning: Encoder service failed to start. Check logs with: journalctl -u encoder${NC}"
+  echo -e "${RED}Warning: Encoder service failed to start.${NC}"
+  echo -e "Check logs with: ${BOLD}journalctl -u encoder -n 50${NC}"
 else
   echo -e "${GREEN}✓ Encoder service is running${NC}"
 fi
@@ -238,9 +357,27 @@ if [ "$ENABLE_HEARTBEAT" == "y" ]; then
   fi
 fi
 
-# Completion message
-echo -e "\n${GREEN}✓ Installation complete!${NC}"
-echo -e "Open the web interface: ${BOLD}http://${FIRST_IP}:8080${NC}"
-echo -e "Default credentials: ${BOLD}admin${NC} / ${BOLD}encoder${NC}"
-echo -e "\nConfigure your SRT outputs via the web interface."
-echo -e "The encoder will auto-start once you add at least one output.\n"
+# =============================================================================
+# COMPLETION
+# =============================================================================
+
+echo -e "\n${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}✓ Installation complete!${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+echo -e "\n${BOLD}Web Interface${NC}"
+echo -e "  URL:      ${BOLD}http://${FIRST_IP}:${WEB_PORT}${NC}"
+echo -e "  Username: ${BOLD}${WEB_USERNAME}${NC}"
+echo -e "  Password: ${BOLD}(as configured)${NC}"
+
+echo -e "\n${BOLD}Next Steps${NC}"
+echo -e "  1. Open the web interface in your browser"
+echo -e "  2. Select your audio input device in Settings"
+echo -e "  3. Add at least one SRT output destination"
+echo -e "  4. Click Start to begin streaming"
+
+echo -e "\n${BOLD}Useful Commands${NC}"
+echo -e "  View logs:      ${BOLD}journalctl -u encoder -f${NC}"
+echo -e "  Restart:        ${BOLD}systemctl restart encoder${NC}"
+echo -e "  Edit config:    ${BOLD}nano ${CONFIG_FILE}${NC}"
+echo ""
