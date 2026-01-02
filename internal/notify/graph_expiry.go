@@ -1,10 +1,12 @@
 package notify
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -27,14 +29,17 @@ type SecretExpiryChecker struct {
 	cachedInfo  types.SecretExpiryInfo
 	lastCheck   time.Time
 	stopCh      chan struct{}
+	doneCh      chan struct{} // signals when current check completes
 	running     bool
+	checking    bool // true while a check is in progress
+	httpClient  *http.Client
 }
 
 // NewSecretExpiryChecker creates a new expiry checker for the given config.
 func NewSecretExpiryChecker(cfg *types.GraphConfig) *SecretExpiryChecker {
 	return &SecretExpiryChecker{
-		cfg:    cfg,
-		stopCh: make(chan struct{}),
+		cfg:        cfg,
+		httpClient: &http.Client{Timeout: httpTimeout},
 	}
 }
 
@@ -45,6 +50,9 @@ func (c *SecretExpiryChecker) Start() {
 		c.mu.Unlock()
 		return
 	}
+	// Recreate channels for restart capability (previous Stop() closed them)
+	c.stopCh = make(chan struct{})
+	c.doneCh = make(chan struct{})
 	c.running = true
 	c.mu.Unlock()
 
@@ -68,13 +76,22 @@ func (c *SecretExpiryChecker) Start() {
 }
 
 // Stop halts the background expiry checking.
+// It waits for any in-progress check to complete before returning.
 func (c *SecretExpiryChecker) Stop() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if !c.running {
+		c.mu.Unlock()
+		return
+	}
+	close(c.stopCh)
+	c.running = false
+	checking := c.checking
+	doneCh := c.doneCh
+	c.mu.Unlock()
 
-	if c.running {
-		close(c.stopCh)
-		c.running = false
+	// Wait for in-progress check to complete
+	if checking && doneCh != nil {
+		<-doneCh
 	}
 }
 
@@ -98,8 +115,21 @@ func (c *SecretExpiryChecker) UpdateConfig(cfg *types.GraphConfig) {
 // check queries the Azure AD Graph API for the app's credential expiry.
 func (c *SecretExpiryChecker) check() {
 	c.mu.Lock()
+	c.checking = true
 	cfg := c.cfg
+	doneCh := c.doneCh
 	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.checking = false
+		c.mu.Unlock()
+		// Signal completion (non-blocking in case no one is waiting)
+		select {
+		case doneCh <- struct{}{}:
+		default:
+		}
+	}()
 
 	if cfg == nil || cfg.TenantID == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
 		c.mu.Lock()
@@ -131,8 +161,6 @@ type applicationResponse struct {
 
 type passwordCredential struct {
 	EndDateTime string `json:"endDateTime"`
-	KeyID       string `json:"keyId"`
-	DisplayName string `json:"displayName"`
 }
 
 // fetchExpiryInfo queries the Azure AD Graph API for credential expiry.
@@ -140,7 +168,7 @@ func (c *SecretExpiryChecker) fetchExpiryInfo(cfg *types.GraphConfig) (types.Sec
 	// Get or create token source
 	c.mu.Lock()
 	if c.tokenSource == nil {
-		ts, err := GetTokenSource(cfg)
+		ts, err := TokenSource(cfg)
 		if err != nil {
 			c.mu.Unlock()
 			return types.SecretExpiryInfo{}, fmt.Errorf("create token source: %w", err)
@@ -156,16 +184,18 @@ func (c *SecretExpiryChecker) fetchExpiryInfo(cfg *types.GraphConfig) (types.Sec
 		return types.SecretExpiryInfo{}, fmt.Errorf("acquire token: %w", err)
 	}
 
-	// Query application by appId
-	url := fmt.Sprintf("%s/applications(appId='%s')", graphBaseURL, cfg.ClientID)
-	req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	// Query application by appId with context for timeout
+	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	defer cancel()
+
+	apiURL := fmt.Sprintf("%s/applications(appId='%s')", graphBaseURL, url.PathEscape(cfg.ClientID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, http.NoBody)
 	if err != nil {
 		return types.SecretExpiryInfo{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return types.SecretExpiryInfo{}, fmt.Errorf("request failed: %w", err)
 	}

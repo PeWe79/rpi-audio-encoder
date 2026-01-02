@@ -220,6 +220,11 @@ func (e *Encoder) Start() error {
 	e.silenceNotifier.Reset()
 	e.peakHolder.Reset()
 
+	// Restart the secret expiry checker if it was stopped
+	if e.secretExpiryChecker != nil {
+		e.secretExpiryChecker.Start()
+	}
+
 	go e.runSourceLoop()
 
 	return nil
@@ -289,6 +294,11 @@ func (e *Encoder) Stop() error {
 	e.sourceCancel = nil
 	e.mu.Unlock()
 
+	// Stop the secret expiry checker goroutine
+	if e.secretExpiryChecker != nil {
+		e.secretExpiryChecker.Stop()
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -356,7 +366,14 @@ func (e *Encoder) GraphSecretExpiry() types.SecretExpiryInfo {
 }
 
 // UpdateGraphConfig notifies the encoder that Graph configuration has changed.
+// This invalidates cached clients and triggers a re-check of secret expiry.
 func (e *Encoder) UpdateGraphConfig() {
+	// Invalidate cached Graph client in silence notifier
+	if e.silenceNotifier != nil {
+		e.silenceNotifier.InvalidateGraphClient()
+	}
+
+	// Update expiry checker with new config
 	if e.secretExpiryChecker != nil {
 		graphCfg := e.config.GraphConfig()
 		e.secretExpiryChecker.UpdateConfig(&graphCfg)

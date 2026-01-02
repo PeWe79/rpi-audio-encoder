@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
+	"github.com/oszuidwest/zwfm-encoder/internal/util"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
@@ -25,7 +29,44 @@ const (
 	maxRetries       = 3
 	initialRetryWait = 1 * time.Second
 	maxRetryWait     = 30 * time.Second
+
+	// HTTP client timeout
+	httpTimeout = 30 * time.Second
 )
+
+// guidPattern validates Azure AD GUID format (standard UUID).
+var guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// validateCredentials checks Graph API credentials.
+// If strict is true, validates GUID format for TenantID and ClientID.
+func validateCredentials(cfg *types.GraphConfig, strict bool) error {
+	if cfg.TenantID == "" {
+		return fmt.Errorf("tenant ID is required")
+	}
+	if strict && !guidPattern.MatchString(cfg.TenantID) {
+		return fmt.Errorf("tenant ID must be a valid GUID (e.g., 12345678-1234-1234-1234-123456789abc)")
+	}
+	if cfg.ClientID == "" {
+		return fmt.Errorf("client ID is required")
+	}
+	if strict && !guidPattern.MatchString(cfg.ClientID) {
+		return fmt.Errorf("client ID must be a valid GUID (e.g., 12345678-1234-1234-1234-123456789abc)")
+	}
+	if cfg.ClientSecret == "" {
+		return fmt.Errorf("client secret is required")
+	}
+	return nil
+}
+
+// newCredentialsConfig creates a clientcredentials.Config for the given GraphConfig.
+func newCredentialsConfig(cfg *types.GraphConfig) *clientcredentials.Config {
+	return &clientcredentials.Config{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		TokenURL:     fmt.Sprintf(tokenURLTemplate, cfg.TenantID),
+		Scopes:       []string{graphScope},
+	}
+}
 
 // GraphClient handles Microsoft Graph API email operations.
 type GraphClient struct {
@@ -35,21 +76,18 @@ type GraphClient struct {
 
 // NewGraphClient creates a new Graph API client with Client Credentials flow.
 func NewGraphClient(cfg *types.GraphConfig) (*GraphClient, error) {
-	if cfg.TenantID == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
-		return nil, fmt.Errorf("graph API requires tenant_id, client_id, and client_secret")
+	if err := validateCredentials(cfg, false); err != nil {
+		return nil, err
 	}
 	if cfg.FromAddress == "" {
-		return nil, fmt.Errorf("graph API requires from_address (shared mailbox)")
+		return nil, fmt.Errorf("from address (shared mailbox) is required")
 	}
 
-	conf := &clientcredentials.Config{
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		TokenURL:     fmt.Sprintf(tokenURLTemplate, cfg.TenantID),
-		Scopes:       []string{graphScope},
-	}
+	conf := newCredentialsConfig(cfg)
 
-	ctx := context.Background()
+	// Configure base HTTP client with timeout to prevent indefinite hangs
+	baseClient := &http.Client{Timeout: httpTimeout}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, baseClient)
 	httpClient := conf.Client(ctx)
 
 	return &GraphClient{
@@ -116,27 +154,23 @@ func (c *GraphClient) SendMail(recipients []string, subject, body string) error 
 	return c.sendWithRetry(payload)
 }
 
-// sendWithRetry implements exponential backoff for failed requests.
+// sendWithRetry implements exponential backoff with jitter for failed requests.
 func (c *GraphClient) sendWithRetry(payload graphMailRequest) error {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/users/%s/sendMail", graphBaseURL, c.fromAddress)
-	retryWait := initialRetryWait
+	apiURL := fmt.Sprintf("%s/users/%s/sendMail", graphBaseURL, url.PathEscape(c.fromAddress))
+	backoff := util.NewBackoff(initialRetryWait, maxRetryWait)
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(retryWait)
-			retryWait *= 2
-			if retryWait > maxRetryWait {
-				retryWait = maxRetryWait
-			}
+			time.Sleep(backoff.Next())
 		}
 
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
+		req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(jsonData))
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
 		}
@@ -154,7 +188,18 @@ func (c *GraphClient) sendWithRetry(payload graphMailRequest) error {
 		switch resp.StatusCode {
 		case http.StatusAccepted, http.StatusOK, http.StatusNoContent:
 			return nil
-		case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		case http.StatusTooManyRequests:
+			// Parse Retry-After header if present (integer seconds only)
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
+					time.Sleep(time.Duration(seconds) * time.Second)
+				}
+			}
+			lastErr = fmt.Errorf("graph API rate limited (429): %s", string(respBody))
+			continue
+		case http.StatusInternalServerError, http.StatusBadGateway,
+			http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			// Transient server errors - retry
 			lastErr = fmt.Errorf("graph API returned %d: %s", resp.StatusCode, string(respBody))
 			continue
 		default:
@@ -171,8 +216,8 @@ func (c *GraphClient) ValidateAuth() error {
 	// Making any request will trigger token acquisition.
 	// We use a lightweight request to /me endpoint which will fail with 403
 	// for app-only auth, but the token acquisition itself validates credentials.
-	url := fmt.Sprintf("%s/users/%s", graphBaseURL, c.fromAddress)
-	req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	apiURL := fmt.Sprintf("%s/users/%s", graphBaseURL, url.PathEscape(c.fromAddress))
+	req, err := http.NewRequest(http.MethodGet, apiURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("create validation request: %w", err)
 	}
@@ -203,16 +248,11 @@ func (c *GraphClient) ValidateAuth() error {
 	}
 }
 
-// ValidateConfig checks if the Graph configuration has all required fields.
+// ValidateConfig checks if the Graph configuration has all required fields with strict validation.
+// This is used for UI validation when saving settings.
 func ValidateConfig(cfg *types.GraphConfig) error {
-	if cfg.TenantID == "" {
-		return fmt.Errorf("tenant ID is required")
-	}
-	if cfg.ClientID == "" {
-		return fmt.Errorf("client ID is required")
-	}
-	if cfg.ClientSecret == "" {
-		return fmt.Errorf("client secret is required")
+	if err := validateCredentials(cfg, true); err != nil {
+		return err
 	}
 	if cfg.FromAddress == "" {
 		return fmt.Errorf("from address (shared mailbox) is required")
@@ -240,19 +280,11 @@ func ParseRecipients(recipients string) []string {
 	return result
 }
 
-// GetTokenSource returns an OAuth2 token source for the given config.
+// TokenSource returns an OAuth2 token source for the given config.
 // This is used by the expiry checker to make authenticated requests.
-func GetTokenSource(cfg *types.GraphConfig) (oauth2.TokenSource, error) {
-	if cfg.TenantID == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
-		return nil, fmt.Errorf("graph API requires tenant_id, client_id, and client_secret")
+func TokenSource(cfg *types.GraphConfig) (oauth2.TokenSource, error) {
+	if err := validateCredentials(cfg, false); err != nil {
+		return nil, err
 	}
-
-	conf := &clientcredentials.Config{
-		ClientID:     cfg.ClientID,
-		ClientSecret: cfg.ClientSecret,
-		TokenURL:     fmt.Sprintf(tokenURLTemplate, cfg.TenantID),
-		Scopes:       []string{graphScope},
-	}
-
-	return conf.TokenSource(context.Background()), nil
+	return newCredentialsConfig(cfg).TokenSource(context.Background()), nil
 }

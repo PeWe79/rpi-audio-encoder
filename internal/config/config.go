@@ -591,7 +591,8 @@ func (s *Snapshot) HasWebhook() bool {
 
 // HasGraph reports whether Microsoft Graph email notifications are configured.
 func (s *Snapshot) HasGraph() bool {
-	return s.GraphTenantID != "" && s.GraphClientID != "" && s.GraphFromAddress != "" && s.GraphRecipients != ""
+	return s.GraphTenantID != "" && s.GraphClientID != "" && s.GraphClientSecret != "" &&
+		s.GraphFromAddress != "" && s.GraphRecipients != ""
 }
 
 // HasLogPath reports whether a log path is configured.

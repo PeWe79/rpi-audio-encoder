@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/oszuidwest/zwfm-encoder/internal/audio"
@@ -19,11 +20,39 @@ type SilenceNotifier struct {
 	webhookSent bool
 	emailSent   bool
 	logSent     bool
+
+	// Cached Graph client for email notifications
+	graphClient *GraphClient
 }
 
 // NewSilenceNotifier returns a SilenceNotifier configured with the given config.
 func NewSilenceNotifier(cfg *config.Config) *SilenceNotifier {
 	return &SilenceNotifier{cfg: cfg}
+}
+
+// InvalidateGraphClient clears the cached Graph client.
+// Call this when Graph configuration changes.
+func (n *SilenceNotifier) InvalidateGraphClient() {
+	n.mu.Lock()
+	n.graphClient = nil
+	n.mu.Unlock()
+}
+
+// getOrCreateGraphClient returns the cached Graph client, creating it if needed.
+func (n *SilenceNotifier) getOrCreateGraphClient(cfg *GraphConfig) (*GraphClient, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.graphClient != nil {
+		return n.graphClient, nil
+	}
+
+	client, err := NewGraphClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	n.graphClient = client
+	return client, nil
 }
 
 // HandleEvent processes a silence event and triggers notifications.
@@ -129,7 +158,9 @@ func BuildGraphConfig(cfg config.Snapshot) *GraphConfig {
 func (n *SilenceNotifier) sendSilenceEmail(cfg config.Snapshot, durationMs int64) {
 	graphCfg := BuildGraphConfig(cfg)
 	util.LogNotifyResult(
-		func() error { return SendSilenceAlert(graphCfg, cfg.StationName, durationMs, cfg.SilenceThreshold) },
+		func() error {
+			return n.sendEmailWithClient(graphCfg, cfg.StationName, durationMs, cfg.SilenceThreshold, true)
+		},
 		"Silence email",
 	)
 }
@@ -138,9 +169,53 @@ func (n *SilenceNotifier) sendSilenceEmail(cfg config.Snapshot, durationMs int64
 func (n *SilenceNotifier) sendRecoveryEmail(cfg config.Snapshot, durationMs int64) {
 	graphCfg := BuildGraphConfig(cfg)
 	util.LogNotifyResult(
-		func() error { return SendRecoveryAlert(graphCfg, cfg.StationName, durationMs) },
+		func() error { return n.sendEmailWithClient(graphCfg, cfg.StationName, durationMs, 0, false) },
 		"Recovery email",
 	)
+}
+
+// sendEmailWithClient sends an email using the cached Graph client.
+func (n *SilenceNotifier) sendEmailWithClient(cfg *GraphConfig, stationName string, durationMs int64, threshold float64, isSilence bool) error {
+	if !IsConfigured(cfg) {
+		return nil
+	}
+
+	client, err := n.getOrCreateGraphClient(cfg)
+	if err != nil {
+		return util.WrapError("create Graph client", err)
+	}
+
+	var subject, body string
+	if isSilence {
+		subject = "[ALERT] Silence Detected - " + stationName
+		body = fmt.Sprintf(
+			"Silence detected on the audio encoder.\n\n"+
+				"Duration:  %.1f seconds\n"+
+				"Threshold: %.1f dB\n"+
+				"Time:      %s\n\n"+
+				"Please check the audio source.",
+			float64(durationMs)/1000.0, threshold, util.HumanTime(),
+		)
+	} else {
+		subject = "[OK] Audio Recovered - " + stationName
+		body = fmt.Sprintf(
+			"Audio recovered on the encoder.\n\n"+
+				"Silence lasted: %.1f seconds\n"+
+				"Time:           %s",
+			float64(durationMs)/1000.0, util.HumanTime(),
+		)
+	}
+
+	recipients := ParseRecipients(cfg.Recipients)
+	if len(recipients) == 0 {
+		return fmt.Errorf("no valid recipients")
+	}
+
+	if err := client.SendMail(recipients, subject, body); err != nil {
+		return util.WrapError("send email via Graph", err)
+	}
+
+	return nil
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
