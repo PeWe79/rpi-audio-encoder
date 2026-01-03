@@ -129,6 +129,13 @@ func (h *CommandHandler) handleEmailUpdate(cmd WSCommand, send chan<- any) {
 	})
 }
 
+// handleZabbixUpdate processes a notifications/zabbix/update command.
+func (h *CommandHandler) handleZabbixUpdate(cmd WSCommand, send chan<- any) {
+	HandleCommand(h, cmd, send, func(req *ZabbixUpdateRequest) error {
+		return h.cfg.SetZabbixConfig(req.Server, req.Port, req.Host, req.Key)
+	})
+}
+
 // --- Recording handlers ---
 
 // handleRegenerateAPIKey processes a recording/regenerate-key command.

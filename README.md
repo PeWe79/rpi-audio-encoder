@@ -8,7 +8,7 @@ Audio streaming software for [ZuidWest FM](https://www.zuidwestfm.nl/) and [Radi
 
 - **Multi-output streaming** - Send to multiple SRT servers with different codecs simultaneously
 - **Real-time VU meters** - Peak hold (1.5 s) with peak/RMS toggle, clip detection, updated via WebSocket
-- **Silence detection** - Alerts via webhook, email, or file log when audio drops below threshold
+- **Silence detection** - Alerts via webhook, email, file log, or Zabbix when audio drops below threshold
 - **Web interface** - Configure outputs, select audio input, monitor levels
 - **Auto-recovery** - Automatic reconnection with configurable retry limits per output
 - **Multiple codecs** - MP3, MP2, Ogg Vorbis, or uncompressed WAV per output
@@ -81,6 +81,7 @@ Monitors audio levels and sends alerts when silence is detected or recovered. Us
 - **Webhook** - POST request to a URL on silence start and recovery
 - **Email** - Microsoft Graph API notification to configured recipients on silence start and recovery
 - **File Log** - Append JSON Lines to a local file for each silence event
+- **Zabbix** - Send trapper items to a Zabbix server on silence start and recovery
 
 Configure via the web interface under Settings → Alerts.
 
@@ -141,6 +142,38 @@ The app sends emails "from" a shared mailbox (not a user mailbox). This is requi
 - **"Access denied"**: Admin consent not granted, or wrong permission type (must be Application, not Delegated)
 - **"Invalid credentials"**: Check Tenant ID, Client ID, and Client Secret are correct
 
+### Zabbix Setup
+
+Zabbix notifications send trapper items to a Zabbix server when silence is detected or recovered. This integrates with your existing Zabbix monitoring and alerting infrastructure.
+
+**Step 1: Import the Template**
+
+1. Download `zabbix/template.xml` from the [GitHub repository](https://github.com/oszuidwest/zwfm-encoder/blob/main/zabbix/template.xml)
+2. In Zabbix web interface, go to **Data collection** → **Templates**
+3. Click **Import** (top right)
+4. Select the downloaded XML file and click **Import**
+
+**Step 2: Link Template to Host**
+
+1. Go to **Data collection** → **Hosts**
+2. Select your encoder host (or create one if it doesn't exist)
+3. Go to the **Templates** tab
+4. Click **Select** and choose **ZWFM Encoder Silence Monitor**
+5. Click **Update**
+
+> **Note:** The template creates a trapper item (`silence.alert`) and triggers for SILENCE (Disaster), RECOVERY (Info), and TEST (Info) events.
+
+**Step 3: Configure the Encoder**
+
+| Field | Description |
+|-------|-------------|
+| Server | Zabbix server hostname or IP address |
+| Port | Zabbix trapper port (default: 10051) |
+| Host | Exact hostname as configured in Zabbix |
+| Key | Item key (default: `silence.alert`) |
+
+> **Tip:** The Host field must exactly match the host name in Zabbix, not the visible display name.
+
 ## Configuration
 
 Configuration is stored in `/etc/encoder/config.json` on production systems. For development, use the `-config` flag to specify a custom path, or place `config.json` next to the binary.
@@ -174,6 +207,12 @@ Configuration is stored in `/etc/encoder/config.json` on production systems. For
       "client_secret": "your-client-secret",
       "from_address": "alerts@yourcompany.com",
       "recipients": "admin@example.com, tech@example.com"
+    },
+    "zabbix": {
+      "server": "zabbix.example.com",
+      "port": 10051,
+      "host": "audio-encoder",
+      "key": "silence.alert"
     }
   },
   "outputs": [
@@ -241,6 +280,10 @@ Choose accent colors that contrast well with the interface background in each mo
 | `notifications.graph.client_secret` | — | Azure AD app registration client secret |
 | `notifications.graph.from_address` | — | Shared mailbox email address (sender) |
 | `notifications.graph.recipients` | — | Comma-separated email addresses |
+| `notifications.zabbix.server` | — | Zabbix server hostname or IP |
+| `notifications.zabbix.port` | 10051 | Zabbix server port |
+| `notifications.zabbix.host` | — | Zabbix host name for trapper items |
+| `notifications.zabbix.key` | — | Zabbix item key for trapper items |
 
 #### Outputs
 
@@ -293,6 +336,7 @@ flowchart LR
         G1[Webhook]
         G2[Email]
         G3[File Log]
+        G4[Zabbix]
     end
 
     A ==> B ==> C
@@ -303,6 +347,7 @@ flowchart LR
     SN -.-> G1
     SN -.-> G2
     SN -.-> G3
+    SN -.-> G4
     C -.->|levels| F
 ```
 
@@ -338,6 +383,7 @@ graph TB
             WEBHOOK[Webhook]
             EMAIL[Email]
             FLOG[File Log]
+            ZABBIX[Zabbix]
         end
 
         subgraph HTTP
@@ -369,6 +415,7 @@ graph TB
     NOTIFIER -.-> WEBHOOK
     NOTIFIER -.-> EMAIL
     NOTIFIER -.-> FLOG
+    NOTIFIER -.-> ZABBIX
     SERVER -.-> ENCODER
 ```
 
