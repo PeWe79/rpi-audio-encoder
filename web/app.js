@@ -953,45 +953,6 @@ document.addEventListener('alpine:init', () => {
         },
 
         /**
-         * Returns CSS class for recorder status dot.
-         * @param {Object} recorder - Recorder object
-         * @returns {string} CSS class
-         */
-        getRecorderStateClass(recorder) {
-            if (recorder.enabled === false) return 'state-stopped';
-            const status = this.recorderStatuses[recorder.id];
-            if (!status) return 'state-stopped';
-            switch (status.state) {
-                case 'recording': return 'state-success';
-                case 'starting': return 'state-warning';
-                case 'finalizing': return 'state-warning';
-                case 'error': return 'state-danger';
-                case 'idle': return 'state-stopped';
-                default: return 'state-stopped';
-            }
-        },
-
-        /**
-         * Returns status text for a recorder.
-         * @param {Object} recorder - Recorder object
-         * @returns {string} Status text
-         */
-        getRecorderStatusText(recorder) {
-            const status = this.recorderStatuses[recorder.id];
-            if (!status) return 'Idle';
-            switch (status.state) {
-                case 'disabled': return 'Disabled';
-                case 'starting': return 'Starting...';
-                case 'running': return 'Recording';
-                case 'rotating': return 'Rotating...';
-                case 'stopping': return 'Finalizing...';
-                case 'error': return status.error || 'Error';
-                case 'stopped': return 'Idle';
-                default: return status.state || 'Unknown';
-            }
-        },
-
-        /**
          * Computes all display data for a recorder in a single call.
          * @param {Object} recorder - Recorder object
          * @returns {Object} Display data with stateClass, statusText, duration
@@ -1302,7 +1263,7 @@ document.addEventListener('alpine:init', () => {
          * Formats a silence log entry for display.
          * For "ended" events, duration is the key metric (total silence time).
          * For "started" events, duration is just detection delay (not shown).
-         * @param {Object} entry - Log entry with timestamp, event, duration_ms, threshold_db
+         * @param {Object} entry - Log entry with timestamp, event, duration_ms, threshold_db, level_left_db, level_right_db
          * @returns {Object} Formatted entry with human-readable values
          */
         formatLogEntry(entry) {
@@ -1327,13 +1288,19 @@ document.addEventListener('alpine:init', () => {
             if (isStart) stateClass = 'state-warning';
             else if (isEnd) stateClass = 'state-success';
 
+            // Format audio levels if present
+            const hasLevels = entry.level_left_db !== undefined && entry.level_right_db !== undefined;
+            const levels = hasLevels
+                ? `L ${entry.level_left_db.toFixed(1)} / R ${entry.level_right_db.toFixed(1)} dB`
+                : '';
+
             return {
                 time: date.toLocaleString(),
                 event: eventText,
                 eventType: isStart ? 'silence' : isEnd ? 'recovery' : 'test',
                 stateClass,
-                // Only show threshold, duration is now in the event name for ended events
-                threshold: `${entry.threshold_db.toFixed(0)} dB`
+                threshold: `${entry.threshold_db.toFixed(0)} dB`,
+                levels
             };
         }
     }));

@@ -58,38 +58,47 @@ func (n *SilenceNotifier) getOrCreateGraphClient(cfg *GraphConfig) (*GraphClient
 // HandleEvent processes a silence event and triggers notifications.
 func (n *SilenceNotifier) HandleEvent(event audio.SilenceEvent) {
 	if event.JustEntered {
-		n.handleSilenceStart(event.DurationMs)
+		n.handleSilenceStart(event.CurrentLevelL, event.CurrentLevelR)
 	}
 
 	if event.JustRecovered {
-		n.handleSilenceEnd(event.TotalDurationMs)
+		n.handleSilenceEnd(event.TotalDurationMs, event.CurrentLevelL, event.CurrentLevelR)
 	}
 }
 
 // handleSilenceStart triggers notifications when silence is first detected.
-func (n *SilenceNotifier) handleSilenceStart(durationMs int64) {
+func (n *SilenceNotifier) handleSilenceStart(levelL, levelR float64) {
 	cfg := n.cfg.Snapshot()
 
-	n.trySend(&n.webhookSent, cfg.HasWebhook(), func() { n.sendSilenceWebhook(cfg, durationMs) })
-	n.trySend(&n.emailSent, cfg.HasGraph(), func() { n.sendSilenceEmail(cfg, durationMs) })
-	n.trySend(&n.logSent, cfg.HasLogPath(), func() { n.logSilenceStart(cfg) })
-}
-
-// trySend sends a notification if the condition is met and not already sent.
-func (n *SilenceNotifier) trySend(sent *bool, condition bool, sender func()) {
+	// Determine which notifications to send (only once per silence period)
 	n.mu.Lock()
-	shouldSend := !*sent && condition
-	if shouldSend {
-		*sent = true
+	shouldSendWebhook := !n.webhookSent && cfg.HasWebhook()
+	shouldSendEmail := !n.emailSent && cfg.HasGraph()
+	shouldSendLog := !n.logSent && cfg.HasLogPath()
+	if shouldSendWebhook {
+		n.webhookSent = true
+	}
+	if shouldSendEmail {
+		n.emailSent = true
+	}
+	if shouldSendLog {
+		n.logSent = true
 	}
 	n.mu.Unlock()
-	if shouldSend {
-		go sender()
+
+	if shouldSendWebhook {
+		go n.sendSilenceWebhook(cfg, levelL, levelR)
+	}
+	if shouldSendEmail {
+		go n.sendSilenceEmail(cfg, levelL, levelR)
+	}
+	if shouldSendLog {
+		go n.logSilenceStart(cfg, levelL, levelR)
 	}
 }
 
 // handleSilenceEnd triggers recovery notifications when silence ends.
-func (n *SilenceNotifier) handleSilenceEnd(totalDurationMs int64) {
+func (n *SilenceNotifier) handleSilenceEnd(totalDurationMs int64, levelL, levelR float64) {
 	cfg := n.cfg.Snapshot()
 
 	// Only send recovery notifications if we sent the corresponding start notification
@@ -104,15 +113,15 @@ func (n *SilenceNotifier) handleSilenceEnd(totalDurationMs int64) {
 	n.mu.Unlock()
 
 	if shouldSendWebhookRecovery {
-		go n.sendRecoveryWebhook(cfg, totalDurationMs)
+		go n.sendRecoveryWebhook(cfg, totalDurationMs, levelL, levelR)
 	}
 
 	if shouldSendEmailRecovery {
-		go n.sendRecoveryEmail(cfg, totalDurationMs)
+		go n.sendRecoveryEmail(cfg, totalDurationMs, levelL, levelR)
 	}
 
 	if shouldSendLogRecovery {
-		go n.logSilenceEnd(cfg, totalDurationMs)
+		go n.logSilenceEnd(cfg, totalDurationMs, levelL, levelR)
 	}
 }
 
@@ -126,17 +135,19 @@ func (n *SilenceNotifier) Reset() {
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func (n *SilenceNotifier) sendSilenceWebhook(cfg config.Snapshot, durationMs int64) {
+func (n *SilenceNotifier) sendSilenceWebhook(cfg config.Snapshot, levelL, levelR float64) {
 	util.LogNotifyResult(
-		func() error { return SendSilenceWebhook(cfg.WebhookURL, durationMs, cfg.SilenceThreshold) },
+		func() error { return SendSilenceWebhook(cfg.WebhookURL, levelL, levelR, cfg.SilenceThreshold) },
 		"Silence webhook",
 	)
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func (n *SilenceNotifier) sendRecoveryWebhook(cfg config.Snapshot, durationMs int64) {
+func (n *SilenceNotifier) sendRecoveryWebhook(cfg config.Snapshot, durationMs int64, levelL, levelR float64) {
 	util.LogNotifyResult(
-		func() error { return SendRecoveryWebhook(cfg.WebhookURL, durationMs) },
+		func() error {
+			return SendRecoveryWebhook(cfg.WebhookURL, durationMs, levelL, levelR, cfg.SilenceThreshold)
+		},
 		"Recovery webhook",
 	)
 }
@@ -155,27 +166,29 @@ func BuildGraphConfig(cfg config.Snapshot) *GraphConfig {
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func (n *SilenceNotifier) sendSilenceEmail(cfg config.Snapshot, durationMs int64) {
+func (n *SilenceNotifier) sendSilenceEmail(cfg config.Snapshot, levelL, levelR float64) {
 	graphCfg := BuildGraphConfig(cfg)
 	util.LogNotifyResult(
 		func() error {
-			return n.sendEmailWithClient(graphCfg, cfg.StationName, durationMs, cfg.SilenceThreshold, true)
+			return n.sendSilenceEmailWithClient(graphCfg, cfg.StationName, levelL, levelR, cfg.SilenceThreshold)
 		},
 		"Silence email",
 	)
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func (n *SilenceNotifier) sendRecoveryEmail(cfg config.Snapshot, durationMs int64) {
+func (n *SilenceNotifier) sendRecoveryEmail(cfg config.Snapshot, durationMs int64, levelL, levelR float64) {
 	graphCfg := BuildGraphConfig(cfg)
 	util.LogNotifyResult(
-		func() error { return n.sendEmailWithClient(graphCfg, cfg.StationName, durationMs, 0, false) },
+		func() error {
+			return n.sendRecoveryEmailWithClient(graphCfg, cfg.StationName, durationMs, levelL, levelR, cfg.SilenceThreshold)
+		},
 		"Recovery email",
 	)
 }
 
-// sendEmailWithClient sends an email using the cached Graph client.
-func (n *SilenceNotifier) sendEmailWithClient(cfg *GraphConfig, stationName string, durationMs int64, threshold float64, isSilence bool) error {
+// sendEmail handles the common email sending infrastructure.
+func (n *SilenceNotifier) sendEmail(cfg *GraphConfig, subject, body string) error {
 	if !IsConfigured(cfg) {
 		return nil
 	}
@@ -183,27 +196,6 @@ func (n *SilenceNotifier) sendEmailWithClient(cfg *GraphConfig, stationName stri
 	client, err := n.getOrCreateGraphClient(cfg)
 	if err != nil {
 		return util.WrapError("create Graph client", err)
-	}
-
-	var subject, body string
-	if isSilence {
-		subject = "[ALERT] Silence Detected - " + stationName
-		body = fmt.Sprintf(
-			"Silence detected on the audio encoder.\n\n"+
-				"Duration:  %.1f seconds\n"+
-				"Threshold: %.1f dB\n"+
-				"Time:      %s\n\n"+
-				"Please check the audio source.",
-			float64(durationMs)/1000.0, threshold, util.HumanTime(),
-		)
-	} else {
-		subject = "[OK] Audio Recovered - " + stationName
-		body = fmt.Sprintf(
-			"Audio recovered on the encoder.\n\n"+
-				"Silence lasted: %.1f seconds\n"+
-				"Time:           %s",
-			float64(durationMs)/1000.0, util.HumanTime(),
-		)
 	}
 
 	recipients := ParseRecipients(cfg.Recipients)
@@ -218,18 +210,46 @@ func (n *SilenceNotifier) sendEmailWithClient(cfg *GraphConfig, stationName stri
 	return nil
 }
 
+// sendSilenceEmailWithClient sends a silence alert email using the cached Graph client.
+func (n *SilenceNotifier) sendSilenceEmailWithClient(cfg *GraphConfig, stationName string, levelL, levelR, threshold float64) error {
+	subject := "[ALERT] Silence Detected - " + stationName
+	body := fmt.Sprintf(
+		"Silence detected on the audio encoder.\n\n"+
+			"Level:     L %.1f dB / R %.1f dB\n"+
+			"Threshold: %.1f dB\n"+
+			"Time:      %s\n\n"+
+			"Silence is ongoing. Please check the audio source.",
+		levelL, levelR, threshold, util.HumanTime(),
+	)
+	return n.sendEmail(cfg, subject, body)
+}
+
+// sendRecoveryEmailWithClient sends a recovery email using the cached Graph client.
+func (n *SilenceNotifier) sendRecoveryEmailWithClient(cfg *GraphConfig, stationName string, durationMs int64, levelL, levelR, threshold float64) error {
+	subject := "[OK] Audio Recovered - " + stationName
+	body := fmt.Sprintf(
+		"Audio recovered on the encoder.\n\n"+
+			"Level:          L %.1f dB / R %.1f dB\n"+
+			"Silence lasted: %s\n"+
+			"Threshold:      %.1f dB\n"+
+			"Time:           %s",
+		levelL, levelR, util.FormatDuration(durationMs), threshold, util.HumanTime(),
+	)
+	return n.sendEmail(cfg, subject, body)
+}
+
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func (n *SilenceNotifier) logSilenceStart(cfg config.Snapshot) {
+func (n *SilenceNotifier) logSilenceStart(cfg config.Snapshot, levelL, levelR float64) {
 	util.LogNotifyResult(
-		func() error { return LogSilenceStart(cfg.LogPath, cfg.SilenceThreshold) },
+		func() error { return LogSilenceStart(cfg.LogPath, levelL, levelR, cfg.SilenceThreshold) },
 		"Silence log",
 	)
 }
 
 //nolint:gocritic // hugeParam: copy is acceptable for infrequent notification events
-func (n *SilenceNotifier) logSilenceEnd(cfg config.Snapshot, durationMs int64) {
+func (n *SilenceNotifier) logSilenceEnd(cfg config.Snapshot, durationMs int64, levelL, levelR float64) {
 	util.LogNotifyResult(
-		func() error { return LogSilenceEnd(cfg.LogPath, durationMs, cfg.SilenceThreshold) },
+		func() error { return LogSilenceEnd(cfg.LogPath, durationMs, levelL, levelR, cfg.SilenceThreshold) },
 		"Recovery log",
 	)
 }
