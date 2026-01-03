@@ -6,9 +6,7 @@ import (
 	"time"
 )
 
-// Backoff is an exponential backoff calculator with jitter.
-// Jitter helps prevent thundering herd problems by randomizing delays.
-// It is safe for concurrent use.
+// Backoff is an exponential backoff calculator with jitter. It is safe for concurrent use.
 type Backoff struct {
 	mu           sync.Mutex
 	current      time.Duration
@@ -19,7 +17,6 @@ type Backoff struct {
 }
 
 // NewBackoff returns a new Backoff with the given initial and maximum delays.
-// Jitter is enabled by default (50%) to prevent thundering herd problems.
 func NewBackoff(initial, maxDelay time.Duration) *Backoff {
 	return &Backoff{
 		current:      initial,
@@ -30,8 +27,7 @@ func NewBackoff(initial, maxDelay time.Duration) *Backoff {
 	}
 }
 
-// Next returns the current delay with jitter and advances to the next value.
-// The returned delay includes random jitter: delay + rand(0, delay*jitterFactor).
+// Next returns the current delay with jitter and advances to the next backoff value.
 func (b *Backoff) Next() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()

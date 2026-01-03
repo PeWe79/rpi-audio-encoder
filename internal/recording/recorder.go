@@ -18,15 +18,7 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// GenericRecorder handles recording to a file with S3 upload.
-// It supports both hourly rotation and on-demand modes, and any codec.
-//
-// Concurrency model:
-//   - mu (RWMutex): Protects state, config, and general fields
-//   - stdinMu (Mutex): Protects stdin I/O specifically (prevents race between Write and Close)
-//
-// This two-mutex pattern is used because holding mu during slow I/O would block
-// all other operations. See WriteAudio() and stopEncoderAndUpload() for usage.
+// GenericRecorder handles recording to a file with optional S3 upload.
 type GenericRecorder struct {
 	mu sync.RWMutex // Protects state, config, file paths
 
@@ -72,8 +64,6 @@ type GenericRecorder struct {
 }
 
 // NewGenericRecorder creates a new recorder with the given configuration.
-// ffmpegPath is the path to the FFmpeg binary.
-// maxDurationMinutes is the global max duration for on-demand recorders.
 func NewGenericRecorder(cfg *types.Recorder, ffmpegPath, tempDir string, maxDurationMinutes int) (*GenericRecorder, error) {
 	r := &GenericRecorder{
 		id:                 cfg.ID,
@@ -117,7 +107,7 @@ func (r *GenericRecorder) S3Client() *s3.Client {
 	return r.s3Client
 }
 
-// IsCurrentFile returns true if the given path is the currently recording file.
+// IsCurrentFile reports whether the given path is the currently recording file.
 func (r *GenericRecorder) IsCurrentFile(path string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -125,8 +115,6 @@ func (r *GenericRecorder) IsCurrentFile(path string) bool {
 }
 
 // Start begins recording asynchronously.
-// Returns immediately after setting state to "starting".
-// The actual validation and FFmpeg startup happen in a background goroutine.
 func (r *GenericRecorder) Start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -221,7 +209,6 @@ func (r *GenericRecorder) setError(msg string) {
 }
 
 // Stop gracefully stops recording.
-// Safe to call multiple times - uses sync.Once to prevent double-close panic.
 func (r *GenericRecorder) Stop() error {
 	r.mu.Lock()
 
@@ -274,7 +261,6 @@ func (r *GenericRecorder) Stop() error {
 }
 
 // WriteAudio writes PCM audio to the encoder.
-// Uses stdinMu to prevent race with concurrent stdin.Close() in stopEncoderAndUpload.
 func (r *GenericRecorder) WriteAudio(pcm []byte) error {
 	r.mu.RLock()
 	state := r.state
@@ -328,7 +314,7 @@ func (r *GenericRecorder) Status() types.ProcessStatus {
 	}
 }
 
-// IsRecording returns true if currently recording.
+// IsRecording reports whether recording is currently in progress.
 func (r *GenericRecorder) IsRecording() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -350,8 +336,6 @@ func (r *GenericRecorder) ClearError() error {
 }
 
 // UpdateConfig updates the recorder configuration.
-// If S3 config changed, the client is recreated.
-// Clears error state since config was modified.
 func (r *GenericRecorder) UpdateConfig(cfg *types.Recorder) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -618,7 +602,7 @@ func (r *GenericRecorder) getContentType() string {
 	}
 }
 
-// isS3Configured returns true if S3 is configured for this recorder.
+// isS3Configured reports whether S3 is configured for this recorder.
 func (r *GenericRecorder) isS3Configured() bool {
 	return r.config.S3Bucket != "" && r.config.S3AccessKeyID != "" && r.config.S3SecretAccessKey != ""
 }

@@ -37,7 +37,7 @@ func createS3Client(cfg *S3Config) (*s3.Client, error) {
 	return s3.New(s3.Options{}, options...), nil
 }
 
-// TestS3Connection tests connectivity to an S3 bucket by uploading and deleting a test file.
+// TestS3Connection tests connectivity to an S3 bucket.
 func TestS3Connection(cfg *S3Config) error {
 	if !cfg.IsConfigured() {
 		return fmt.Errorf("S3 is not configured")

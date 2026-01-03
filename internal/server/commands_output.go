@@ -99,7 +99,7 @@ func (h *CommandHandler) handleDeleteOutput(cmd WSCommand, send chan<- interface
 	}
 }
 
-// outputNeedsRestart checks if connection parameters changed between existing and updated output.
+// outputNeedsRestart reports whether an output needs restart after configuration changes.
 func outputNeedsRestart(existing, updated *types.Output) bool {
 	return existing.Host != updated.Host ||
 		existing.Port != updated.Port ||

@@ -23,17 +23,7 @@ const (
 	versionRetryDelay    = 1 * time.Minute          // Delay between retries
 )
 
-// VersionChecker is a background service that checks GitHub for new releases.
-//
-// Concurrency: The run() goroutine uses stopCh to know when to exit.
-// This is the standard Go pattern for stoppable goroutines:
-//
-//	select {
-//	case <-stopCh:  // Exit signal received
-//	    return
-//	case <-ticker.C:  // Normal operation
-//	    doWork()
-//	}
+// VersionChecker periodically checks GitHub for new releases. It is safe for concurrent use.
 type VersionChecker struct {
 	mu     sync.RWMutex
 	latest string
@@ -211,7 +201,7 @@ func canonicalVersion(v string) string {
 	return v
 }
 
-// isNewerVersion returns true if latest is newer than current using semver comparison.
+// isNewerVersion reports whether latest is newer than current using semver comparison.
 func isNewerVersion(latest, current string) bool {
 	latestCanon := canonicalVersion(latest)
 	currentCanon := canonicalVersion(current)

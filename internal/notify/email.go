@@ -12,7 +12,6 @@ import (
 type GraphConfig = types.GraphConfig
 
 // SendTestEmail sends a test email to verify Microsoft Graph configuration.
-// This function first validates authentication before sending the test email.
 func SendTestEmail(cfg *GraphConfig, stationName string) error {
 	if err := ValidateConfig(cfg); err != nil {
 		return fmt.Errorf("configuration error: %w", err)

@@ -152,7 +152,7 @@ func (h *CommandHandler) handleUpdateSettings(cmd WSCommand) {
 	}
 }
 
-// handleRegenerateAPIKey generates a new API key.
+// handleRegenerateAPIKey processes a regenerate_api_key WebSocket command.
 func (h *CommandHandler) handleRegenerateAPIKey(send chan<- interface{}) {
 	go func() {
 		defer func() {
