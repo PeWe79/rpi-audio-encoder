@@ -31,7 +31,6 @@ func NewSilenceNotifier(cfg *config.Config) *SilenceNotifier {
 }
 
 // InvalidateGraphClient clears the cached Graph client.
-// Call this when Graph configuration changes.
 func (n *SilenceNotifier) InvalidateGraphClient() {
 	n.mu.Lock()
 	n.graphClient = nil
@@ -187,7 +186,7 @@ func (n *SilenceNotifier) sendRecoveryEmail(cfg config.Snapshot, durationMs int6
 	)
 }
 
-// sendEmail handles the common email sending infrastructure.
+// sendEmail sends an email using the given configuration.
 func (n *SilenceNotifier) sendEmail(cfg *GraphConfig, subject, body string) error {
 	if !IsConfigured(cfg) {
 		return nil

@@ -26,8 +26,6 @@ type Manager struct {
 }
 
 // NewManager creates a new recording manager.
-// ffmpegPath is the path to the FFmpeg binary.
-// maxDurationMinutes is the global max duration for on-demand recorders.
 func NewManager(ffmpegPath, apiKey, tempDir string, maxDurationMinutes int) (*Manager, error) {
 	if tempDir == "" {
 		tempDir = DefaultTempDir
@@ -111,8 +109,7 @@ func (m *Manager) UpdateRecorder(cfg *types.Recorder) error {
 	return recorder.UpdateConfig(cfg)
 }
 
-// StartRecorder starts a specific recorder via API.
-// Only on-demand recorders can be started via API. Returns error for hourly recorders.
+// StartRecorder starts a specific on-demand recorder via API.
 func (m *Manager) StartRecorder(id string) error {
 	m.mu.RLock()
 	recorder, exists := m.recorders[id]
@@ -135,8 +132,7 @@ func (m *Manager) StartRecorder(id string) error {
 	return recorder.Start()
 }
 
-// StopRecorder stops a specific recorder via API.
-// Only on-demand recorders can be stopped via API. Returns error for hourly recorders.
+// StopRecorder stops a specific on-demand recorder via API.
 func (m *Manager) StopRecorder(id string) error {
 	m.mu.RLock()
 	recorder, exists := m.recorders[id]

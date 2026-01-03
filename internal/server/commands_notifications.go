@@ -25,8 +25,7 @@ func (h *CommandHandler) runTest(testType string) error {
 	}
 }
 
-// handleTest executes a notification test and sends the result to the client.
-// testCmd should be in format "test_<type>" (e.g., "test_email", "test_webhook").
+// handleTest processes a notification test WebSocket command.
 func (h *CommandHandler) handleTest(send chan<- interface{}, testCmd string) {
 	testType := strings.TrimPrefix(testCmd, "test_")
 
@@ -60,7 +59,7 @@ func (h *CommandHandler) handleTest(send chan<- interface{}, testCmd string) {
 	}()
 }
 
-// handleViewSilenceLog reads and returns the silence log file contents.
+// handleViewSilenceLog processes a view_silence_log WebSocket command.
 func (h *CommandHandler) handleViewSilenceLog(send chan<- interface{}) {
 	go func() {
 		defer func() {

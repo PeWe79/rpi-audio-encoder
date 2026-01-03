@@ -16,7 +16,6 @@ func ShutdownSignals() []os.Signal {
 }
 
 // GracefulSignal attempts graceful process termination.
-// On Windows, returns an error to trigger the WaitDelay then kill fallback.
 func GracefulSignal(p *os.Process) error {
 	// Return error so exec.Cmd will wait WaitDelay, then kill.
 	// This is safer than immediate kill - gives stdin EOF time to work.

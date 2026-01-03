@@ -76,9 +76,7 @@ func IsConfigured(values ...string) bool {
 	return true
 }
 
-// ValidatePath validates a file path for security.
-// It cleans the path and rejects path traversal attempts (.. components).
-// Returns nil if the path is valid.
+// ValidatePath validates a file path for security. Returns nil if valid.
 func ValidatePath(field, path string) *ValidationError {
 	if path == "" {
 		return &ValidationError{Field: field, Message: fmt.Sprintf("%s is required", field)}
@@ -102,9 +100,7 @@ func ValidatePath(field, path string) *ValidationError {
 	return nil
 }
 
-// CheckPathWritable verifies that a directory path is writable.
-// It creates the directory if it doesn't exist, then attempts to create,
-// write to, and delete a test file. Returns an error if any operation fails.
+// CheckPathWritable verifies that a directory path exists and is writable.
 func CheckPathWritable(path string) error {
 	// Create directory if it doesn't exist
 	if err := os.MkdirAll(path, 0o755); err != nil {

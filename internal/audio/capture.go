@@ -21,9 +21,7 @@ type CaptureConfig struct {
 	BuildArgs func(device string) []string
 }
 
-// BuildCaptureCommand returns the command and arguments for audio capture.
-// If device is empty, it attempts to use the default or auto-detect.
-// The ffmpegPath parameter is used on platforms that use FFmpeg for capture.
+// BuildCaptureCommand returns the command and arguments for audio capture on the current platform.
 func BuildCaptureCommand(device, ffmpegPath string) (cmd string, args []string, err error) {
 	cfg := getPlatformConfig()
 

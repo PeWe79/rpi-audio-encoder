@@ -41,7 +41,6 @@ func NewCommandHandler(cfg *config.Config, enc *encoder.Encoder, ffmpegAvailable
 }
 
 // Handle processes a WebSocket command and performs the requested action.
-// The send channel is used for thread-safe communication back to the client.
 func (h *CommandHandler) Handle(cmd WSCommand, send chan<- interface{}, triggerStatusUpdate func()) {
 	switch cmd.Type {
 	case "add_output":

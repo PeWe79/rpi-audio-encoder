@@ -90,7 +90,7 @@ type Output struct {
 	CreatedAt  int64  `json:"created_at"`            // Unix timestamp of creation
 }
 
-// IsEnabled returns whether the output is enabled (defaults to true if not set).
+// IsEnabled reports whether the output is enabled, defaulting to true if not set.
 func (o *Output) IsEnabled() bool {
 	return o.Enabled == nil || *o.Enabled
 }
@@ -99,7 +99,6 @@ func (o *Output) IsEnabled() bool {
 const DefaultMaxRetries = 99
 
 // OutputRestartDelay is the delay between stopping and starting an output during restart.
-// SRT connections with high latency settings need time to fully close on the server side.
 const OutputRestartDelay = 2000 * time.Millisecond
 
 // MaxRetriesOrDefault returns the configured max retries or the default value.
@@ -158,10 +157,8 @@ type RotationMode string
 
 const (
 	// RotationHourly rotates recordings at system clock hour boundaries.
-	// Hourly recorders always auto-start when encoder starts.
 	RotationHourly RotationMode = "hourly"
-	// RotationOnDemand allows API-controlled start/stop with global max duration.
-	// On-demand recorders never auto-start - require explicit API call.
+	// RotationOnDemand allows API-controlled recording start and stop.
 	RotationOnDemand RotationMode = "ondemand"
 )
 
@@ -201,7 +198,7 @@ type Recorder struct {
 	CreatedAt     int64 `json:"created_at"`               // Unix timestamp of creation
 }
 
-// IsEnabled returns whether the recorder is enabled (defaults to true if not set).
+// IsEnabled reports whether the recorder is enabled, defaulting to true if not set.
 func (r *Recorder) IsEnabled() bool {
 	return r.Enabled == nil || *r.Enabled
 }

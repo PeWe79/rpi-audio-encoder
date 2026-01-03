@@ -46,8 +46,7 @@ func DarkenColor(hex string, percent int) string {
 	)
 }
 
-// GenerateBrandCSS generates the CSS custom properties for branding.
-// Uses light color by default, switches to dark color via prefers-color-scheme.
+// GenerateBrandCSS generates CSS custom properties for branding.
 func GenerateBrandCSS(colorLight, colorDark string) string {
 	hoverLight := DarkenColor(colorLight, 10)
 	hoverDark := DarkenColor(colorDark, 10)

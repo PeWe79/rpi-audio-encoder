@@ -29,9 +29,6 @@ type OutputContext interface {
 }
 
 // Manager manages multiple output FFmpeg processes.
-//
-// Concurrency: Uses mu (RWMutex) to protect the processes map.
-// Each Process has its own stdinMu to protect I/O operations.
 type Manager struct {
 	ffmpegPath string
 	processes  map[string]*Process
@@ -39,9 +36,6 @@ type Manager struct {
 }
 
 // Process tracks an individual output FFmpeg process.
-//
-// Concurrency: stdinMu protects stdin from concurrent access.
-// This prevents a race where WriteAudio() writes while Stop() closes stdin.
 type Process struct {
 	cmd         *exec.Cmd
 	ctx         context.Context
@@ -201,7 +195,6 @@ func (m *Manager) StopAll() error {
 }
 
 // WriteAudio writes audio data to a specific output.
-// Uses proc.stdinMu to prevent race with concurrent stdin.Close() in Stop.
 func (m *Manager) WriteAudio(outputID string, data []byte) error {
 	// Get process under read lock
 	m.mu.RLock()

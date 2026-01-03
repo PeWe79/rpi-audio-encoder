@@ -13,8 +13,7 @@ func HumanTime() string {
 	return time.Now().Format(humanTimeFormat)
 }
 
-// FormatHumanTime parses an RFC3339 string and returns human-readable format in local time.
-// Returns "unknown" for empty input, or the original string if parsing fails.
+// FormatHumanTime converts an RFC3339 timestamp to human-readable local time format.
 func FormatHumanTime(rfc3339 string) string {
 	if rfc3339 == "" || rfc3339 == "unknown" {
 		return "unknown"

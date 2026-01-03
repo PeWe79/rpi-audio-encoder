@@ -39,33 +39,33 @@ var (
 	stationColorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 )
 
-// WebConfig is the web server configuration.
+// WebConfig holds web server settings including port and credentials.
 type WebConfig struct {
 	Port     int    `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-// AudioConfig is the audio input configuration.
+// AudioConfig holds audio input device settings.
 type AudioConfig struct {
 	Input string `json:"input"`
 }
 
-// SilenceDetectionConfig is the silence detection configuration.
+// SilenceDetectionConfig holds silence detection thresholds and timing parameters.
 type SilenceDetectionConfig struct {
 	ThresholdDB float64 `json:"threshold_db,omitempty"`
 	DurationMs  int64   `json:"duration_ms,omitempty"`
 	RecoveryMs  int64   `json:"recovery_ms,omitempty"`
 }
 
-// NotificationsConfig is the notification configuration.
+// NotificationsConfig holds notification settings for webhooks, logs, and email.
 type NotificationsConfig struct {
 	WebhookURL string            `json:"webhook_url,omitempty"`
 	LogPath    string            `json:"log_path,omitempty"`
 	Graph      types.GraphConfig `json:"graph,omitempty"`
 }
 
-// StationConfig is the station branding configuration.
+// StationConfig holds station branding settings including name and theme colors.
 type StationConfig struct {
 	Name       string `json:"name"`
 	ColorLight string `json:"color_light"`
@@ -408,7 +408,6 @@ func (c *Config) AudioInput() string {
 }
 
 // GetFFmpegPath returns the configured FFmpeg binary path.
-// Note: "Get" prefix used to avoid collision with FFmpegPath field.
 func (c *Config) GetFFmpegPath() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -601,7 +600,6 @@ func (s *Snapshot) HasLogPath() bool {
 }
 
 // GetRecordingAPIKey returns the API key for recording REST endpoints.
-// Note: "Get" prefix used to avoid collision with RecordingAPIKey field.
 func (c *Config) GetRecordingAPIKey() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

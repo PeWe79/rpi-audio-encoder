@@ -23,17 +23,23 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// LevelUpdateSamples is the number of samples before updating audio levels.
+// LevelUpdateSamples specifies how many samples to process between level updates.
 const LevelUpdateSamples = 12000
 
-// Sentinel errors for encoder operations.
-var (
-	ErrNoAudioInput   = errors.New("no audio input configured")
-	ErrAlreadyRunning = errors.New("encoder already running")
-	ErrNotRunning     = errors.New("encoder not running")
-	ErrOutputDisabled = errors.New("output is disabled")
-	ErrOutputNotFound = errors.New("output not found")
-)
+// ErrNoAudioInput indicates no audio input device is configured.
+var ErrNoAudioInput = errors.New("no audio input configured")
+
+// ErrAlreadyRunning indicates the encoder is already running.
+var ErrAlreadyRunning = errors.New("encoder already running")
+
+// ErrNotRunning indicates the encoder is not running.
+var ErrNotRunning = errors.New("encoder not running")
+
+// ErrOutputDisabled indicates the output is disabled.
+var ErrOutputDisabled = errors.New("output is disabled")
+
+// ErrOutputNotFound indicates the output was not found.
+var ErrOutputNotFound = errors.New("output not found")
 
 // Encoder manages audio capture and distribution to multiple streaming outputs.
 type Encoder struct {
@@ -77,8 +83,6 @@ func New(cfg *config.Config, ffmpegPath string) *Encoder {
 }
 
 // InitRecording initializes the recording manager.
-// This should be called before Start(). Always creates the manager
-// so recorders can be added at runtime.
 func (e *Encoder) InitRecording() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -159,8 +163,6 @@ func (e *Encoder) Status() types.EncoderStatus {
 }
 
 // AllOutputStatuses returns status for all configured outputs.
-// This includes disabled outputs (with State: ProcessDisabled) and outputs without
-// active processes, ensuring the frontend always has complete status data.
 func (e *Encoder) AllOutputStatuses(outputs []types.Output) map[string]types.ProcessStatus {
 	// Get statuses for outputs with active processes
 	processStatuses := e.outputManager.AllStatuses(func(id string) int {
@@ -290,7 +292,7 @@ func (e *Encoder) Stop() error {
 	return errors.Join(errs...)
 }
 
-// Restart stops and starts the encoder.
+// Restart performs a full encoder restart cycle.
 func (e *Encoder) Restart() error {
 	if err := e.Stop(); err != nil {
 		return fmt.Errorf("stop: %w", err)
@@ -353,8 +355,7 @@ func (e *Encoder) GraphSecretExpiry() types.SecretExpiryInfo {
 	return e.secretExpiryChecker.GetInfo()
 }
 
-// UpdateGraphConfig notifies the encoder that Graph configuration has changed.
-// This invalidates cached clients and triggers a re-check of secret expiry.
+// UpdateGraphConfig notifies the encoder of Graph configuration changes.
 func (e *Encoder) UpdateGraphConfig() {
 	// Invalidate cached Graph client in silence notifier
 	if e.silenceNotifier != nil {
@@ -368,8 +369,7 @@ func (e *Encoder) UpdateGraphConfig() {
 	}
 }
 
-// UpdateSilenceConfig notifies the encoder that silence detection settings have changed.
-// This resets the silence detector state to ensure the new settings take effect immediately.
+// UpdateSilenceConfig applies new silence detection settings immediately.
 func (e *Encoder) UpdateSilenceConfig() {
 	if e.silenceDetect != nil {
 		e.silenceDetect.Reset()

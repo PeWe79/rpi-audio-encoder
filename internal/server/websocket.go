@@ -21,8 +21,7 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: checkOrigin,
 }
 
-// checkOrigin validates WebSocket connection origins to prevent CSWSH attacks.
-// Accepts same-origin requests, localhost, and private IP ranges.
+// checkOrigin reports whether the WebSocket connection origin is allowed.
 func checkOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	// Same-origin requests omit the Origin header

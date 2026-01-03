@@ -154,7 +154,7 @@ func (c *GraphClient) SendMail(recipients []string, subject, body string) error 
 	return c.sendWithRetry(payload)
 }
 
-// sendWithRetry implements exponential backoff with jitter for failed requests.
+// sendWithRetry sends the request with automatic retries on transient failures.
 func (c *GraphClient) sendWithRetry(payload graphMailRequest) error {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -210,7 +210,7 @@ func (c *GraphClient) sendWithRetry(payload graphMailRequest) error {
 	return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
-// ValidateAuth attempts to acquire a token to validate the Graph API credentials.
+// ValidateAuth reports whether the Graph API credentials are valid.
 func (c *GraphClient) ValidateAuth() error {
 	// The httpClient already has a token source configured.
 	// Making any request will trigger token acquisition.
@@ -248,8 +248,7 @@ func (c *GraphClient) ValidateAuth() error {
 	}
 }
 
-// ValidateConfig checks if the Graph configuration has all required fields with strict validation.
-// This is used for UI validation when saving settings.
+// ValidateConfig reports whether cfg has all required fields with valid formats.
 func ValidateConfig(cfg *types.GraphConfig) error {
 	if err := validateCredentials(cfg, true); err != nil {
 		return err
@@ -263,7 +262,7 @@ func ValidateConfig(cfg *types.GraphConfig) error {
 	return nil
 }
 
-// IsConfigured returns true if the Graph configuration has the minimum required fields.
+// IsConfigured reports whether the Graph configuration has the minimum required fields.
 func IsConfigured(cfg *types.GraphConfig) bool {
 	return cfg.TenantID != "" && cfg.ClientID != "" && cfg.ClientSecret != "" &&
 		cfg.FromAddress != "" && cfg.Recipients != ""
@@ -281,7 +280,6 @@ func ParseRecipients(recipients string) []string {
 }
 
 // TokenSource returns an OAuth2 token source for the given config.
-// This is used by the expiry checker to make authenticated requests.
 func TokenSource(cfg *types.GraphConfig) (oauth2.TokenSource, error) {
 	if err := validateCredentials(cfg, false); err != nil {
 		return nil, err

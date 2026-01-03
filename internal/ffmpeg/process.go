@@ -21,7 +21,7 @@ type Process struct {
 	Stderr *bytes.Buffer
 }
 
-// BaseInputArgs returns the common FFmpeg input arguments for PCM audio.
+// BaseInputArgs returns the standard FFmpeg arguments for reading audio from stdin.
 func BaseInputArgs() []string {
 	return []string{
 		"-f", "s16le",
@@ -32,8 +32,6 @@ func BaseInputArgs() []string {
 }
 
 // StartProcess creates and starts an FFmpeg process with the given arguments.
-// Returns a Process struct containing the command, context, stdin pipe, and stderr buffer.
-// The caller is responsible for calling Cancel() and closing Stdin when done.
 func StartProcess(ffmpegPath string, args []string) (*Process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)

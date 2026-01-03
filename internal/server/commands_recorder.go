@@ -10,8 +10,7 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// validateLocalPath checks that LocalPath is set, validates it for security,
-// and verifies it is writable.
+// validateLocalPath reports whether the recorder's local path is valid and writable.
 func validateLocalPath(recorder *types.Recorder) error {
 	// Security: validate path to prevent path traversal attacks
 	if err := util.ValidatePath("local_path", recorder.LocalPath); err != nil {
@@ -24,7 +23,7 @@ func validateLocalPath(recorder *types.Recorder) error {
 	return nil
 }
 
-// validateS3Fields checks that required S3 fields are set.
+// validateS3Fields reports whether required S3 fields are configured.
 func validateS3Fields(recorder *types.Recorder) error {
 	if recorder.S3Bucket == "" {
 		return fmt.Errorf("s3_bucket is required")
@@ -38,7 +37,7 @@ func validateS3Fields(recorder *types.Recorder) error {
 	return nil
 }
 
-// validateRecorder validates a recorder configuration.
+// validateRecorder validates and applies defaults to a recorder configuration.
 func validateRecorder(recorder *types.Recorder) error {
 	if err := util.ValidateRequired("name", recorder.Name); err != nil {
 		return err
@@ -81,7 +80,7 @@ func validateRecorder(recorder *types.Recorder) error {
 	return nil
 }
 
-// handleAddRecorder creates a new recorder.
+// handleAddRecorder processes an add_recorder WebSocket command.
 func (h *CommandHandler) handleAddRecorder(cmd WSCommand, send chan<- interface{}) {
 	var recorder types.Recorder
 	if err := json.Unmarshal(cmd.Data, &recorder); err != nil {
@@ -109,7 +108,7 @@ func (h *CommandHandler) handleAddRecorder(cmd WSCommand, send chan<- interface{
 	sendRecorderResult(send, "add", recorder.ID, true, "")
 }
 
-// handleDeleteRecorder removes a recorder.
+// handleDeleteRecorder processes a delete_recorder WebSocket command.
 func (h *CommandHandler) handleDeleteRecorder(cmd WSCommand, send chan<- interface{}) {
 	if cmd.ID == "" {
 		slog.Warn("delete_recorder: no ID provided")
@@ -127,7 +126,7 @@ func (h *CommandHandler) handleDeleteRecorder(cmd WSCommand, send chan<- interfa
 	sendRecorderResult(send, "delete", cmd.ID, true, "")
 }
 
-// handleUpdateRecorder updates a recorder configuration.
+// handleUpdateRecorder processes an update_recorder WebSocket command.
 func (h *CommandHandler) handleUpdateRecorder(cmd WSCommand, send chan<- interface{}) {
 	if cmd.ID == "" {
 		slog.Warn("update_recorder: no ID provided")
@@ -172,7 +171,7 @@ func (h *CommandHandler) handleUpdateRecorder(cmd WSCommand, send chan<- interfa
 	sendRecorderResult(send, "update", updated.ID, true, "")
 }
 
-// handleStartRecorder starts a specific recorder.
+// handleStartRecorder processes a start_recorder WebSocket command.
 func (h *CommandHandler) handleStartRecorder(cmd WSCommand, send chan<- interface{}) {
 	if cmd.ID == "" {
 		slog.Warn("start_recorder: no ID provided")
@@ -190,7 +189,7 @@ func (h *CommandHandler) handleStartRecorder(cmd WSCommand, send chan<- interfac
 	sendRecorderResult(send, "start", cmd.ID, true, "")
 }
 
-// handleStopRecorder stops a specific recorder.
+// handleStopRecorder processes a stop_recorder WebSocket command.
 func (h *CommandHandler) handleStopRecorder(cmd WSCommand, send chan<- interface{}) {
 	if cmd.ID == "" {
 		slog.Warn("stop_recorder: no ID provided")
@@ -208,7 +207,7 @@ func (h *CommandHandler) handleStopRecorder(cmd WSCommand, send chan<- interface
 	sendRecorderResult(send, "stop", cmd.ID, true, "")
 }
 
-// handleClearRecorderError clears the error state for a recorder.
+// handleClearRecorderError processes a clear_recorder_error WebSocket command.
 func (h *CommandHandler) handleClearRecorderError(cmd WSCommand, send chan<- interface{}) {
 	if cmd.ID == "" {
 		slog.Warn("clear_recorder_error: no ID provided")
@@ -226,7 +225,7 @@ func (h *CommandHandler) handleClearRecorderError(cmd WSCommand, send chan<- int
 	sendRecorderResult(send, "clear_error", cmd.ID, true, "")
 }
 
-// handleTestRecorderS3 tests S3 connectivity for a recorder.
+// handleTestRecorderS3 processes a test_recorder_s3 WebSocket command.
 func (h *CommandHandler) handleTestRecorderS3(cmd WSCommand, send chan<- interface{}) {
 	var data struct {
 		Endpoint  string `json:"s3_endpoint"`

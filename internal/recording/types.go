@@ -28,7 +28,7 @@ type S3Config struct {
 	SecretAccessKey string `json:"secret_access_key,omitempty"` // AWS secret access key
 }
 
-// IsConfigured returns true if S3 settings are configured.
+// IsConfigured reports whether S3 settings are configured.
 func (c *S3Config) IsConfigured() bool {
 	return c.Bucket != "" && c.AccessKeyID != "" && c.SecretAccessKey != ""
 }
