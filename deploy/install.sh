@@ -77,43 +77,70 @@ if ! grep -q "^dtoverlay=hifiberry" "$CONFIG_TXT"; then
 fi
 
 # =============================================================================
-# CONFIGURATION QUESTIONS (all upfront)
+# DETECT EXISTING INSTALLATION
 # =============================================================================
 
-echo -e "${BLUE}►► Configuration${NC}\n"
+if [ -f "$CONFIG_FILE" ] || [ -f "${INSTALL_DIR}/encoder" ]; then
+  echo -e "${YELLOW}►► Existing installation detected${NC}\n"
 
-# Station name
-prompt_user "STATION_NAME" "ZuidWest FM" "Enter your station name" "str"
-
-# Web username
-prompt_user "WEB_USERNAME" "admin" "Enter the web interface username" "str"
-
-# Web password
-prompt_user "WEB_PASSWORD" "encoder" "Enter the web interface password" "str"
-
-# Web port
-prompt_user "WEB_PORT" "8080" "Enter the web interface port" "num"
-
-# Timezone with validation (retry loop)
-while true; do
-  prompt_user "TIMEZONE" "Europe/Amsterdam" "Enter your timezone (e.g. Europe/Amsterdam, Europe/London, Europe/Berlin)" "str"
-  if timedatectl list-timezones | grep -qx "$TIMEZONE"; then
-    break
+  if [ -f "$CONFIG_FILE" ]; then
+    echo -e "Found configuration at: ${BOLD}${CONFIG_FILE}${NC}"
   fi
-  echo -e "${RED}Invalid timezone '${TIMEZONE}'. Use 'timedatectl list-timezones' to see valid options.${NC}"
-done
+  if [ -f "${INSTALL_DIR}/encoder" ]; then
+    CURRENT_VERSION=$("${INSTALL_DIR}/encoder" -version 2>/dev/null || echo "unknown")
+    echo -e "Found encoder binary:   ${BOLD}${INSTALL_DIR}/encoder${NC} (${CURRENT_VERSION})"
+  fi
 
-echo ""
+  echo ""
+  prompt_user "KEEP_CONFIG" "y" "Keep existing configuration? (y=update only, n=fresh install)" "y/n"
+  echo ""
+else
+  KEEP_CONFIG="n"
+fi
 
-# OS updates
+# =============================================================================
+# CONFIGURATION QUESTIONS (skip if keeping existing config)
+# =============================================================================
+
+if [ "$KEEP_CONFIG" != "y" ]; then
+  echo -e "${BLUE}►► Configuration${NC}\n"
+
+  # Station name
+  prompt_user "STATION_NAME" "ZuidWest FM" "Enter your station name" "str"
+
+  # Web username
+  prompt_user "WEB_USERNAME" "admin" "Enter the web interface username" "str"
+
+  # Web password
+  prompt_user "WEB_PASSWORD" "encoder" "Enter the web interface password" "str"
+
+  # Web port
+  prompt_user "WEB_PORT" "8080" "Enter the web interface port" "num"
+
+  # Timezone with validation (retry loop)
+  while true; do
+    prompt_user "TIMEZONE" "Europe/Amsterdam" "Enter your timezone (e.g. Europe/Amsterdam, Europe/London, Europe/Berlin)" "str"
+    if timedatectl list-timezones | grep -qx "$TIMEZONE"; then
+      break
+    fi
+    echo -e "${RED}Invalid timezone '${TIMEZONE}'. Use 'timedatectl list-timezones' to see valid options.${NC}"
+  done
+
+  echo ""
+fi
+
+# These questions apply to both update and fresh install
 prompt_user "DO_UPDATES" "y" "Do you want to perform all OS updates? (y/n)" "y/n"
 
-# Heartbeat monitoring
-prompt_user "ENABLE_HEARTBEAT" "n" "Do you want to enable heartbeat monitoring via UptimeRobot? (y/n)" "y/n"
-
+# Heartbeat monitoring (only ask on fresh install)
 HEARTBEAT_URL=""
-if [ "$ENABLE_HEARTBEAT" == "y" ]; then
-  prompt_user "HEARTBEAT_URL" "" "Enter the heartbeat URL to ping every minute" "str"
+if [ "$KEEP_CONFIG" != "y" ]; then
+  prompt_user "ENABLE_HEARTBEAT" "n" "Do you want to enable heartbeat monitoring via UptimeRobot? (y/n)" "y/n"
+  if [ "$ENABLE_HEARTBEAT" == "y" ]; then
+    prompt_user "HEARTBEAT_URL" "" "Enter the heartbeat URL to ping every minute" "str"
+  fi
+else
+  ENABLE_HEARTBEAT="n"
 fi
 
 # Beta version
@@ -124,16 +151,21 @@ prompt_user "INSTALL_BETA" "n" "Do you want to install a beta/prerelease version
 # =============================================================================
 
 echo -e "\n${BLUE}►► Installation Summary${NC}\n"
-echo -e "Station name:     ${BOLD}${STATION_NAME}${NC}"
-echo -e "Web username:     ${BOLD}${WEB_USERNAME}${NC}"
-echo -e "Web password:     ${BOLD}********${NC}"
-echo -e "Web port:         ${BOLD}${WEB_PORT}${NC}"
-echo -e "Timezone:         ${BOLD}${TIMEZONE}${NC}"
-echo -e "OS updates:       ${BOLD}${DO_UPDATES}${NC}"
-echo -e "Heartbeat:        ${BOLD}${ENABLE_HEARTBEAT}${NC}"
-if [ "$ENABLE_HEARTBEAT" == "y" ]; then
-  echo -e "Heartbeat URL:    ${BOLD}${HEARTBEAT_URL}${NC}"
+if [ "$KEEP_CONFIG" == "y" ]; then
+  echo -e "Mode:             ${BOLD}Update (keeping existing config)${NC}"
+else
+  echo -e "Mode:             ${BOLD}Fresh install${NC}"
+  echo -e "Station name:     ${BOLD}${STATION_NAME}${NC}"
+  echo -e "Web username:     ${BOLD}${WEB_USERNAME}${NC}"
+  echo -e "Web password:     ${BOLD}********${NC}"
+  echo -e "Web port:         ${BOLD}${WEB_PORT}${NC}"
+  echo -e "Timezone:         ${BOLD}${TIMEZONE}${NC}"
+  echo -e "Heartbeat:        ${BOLD}${ENABLE_HEARTBEAT}${NC}"
+  if [ "$ENABLE_HEARTBEAT" == "y" ]; then
+    echo -e "Heartbeat URL:    ${BOLD}${HEARTBEAT_URL}${NC}"
+  fi
 fi
+echo -e "OS updates:       ${BOLD}${DO_UPDATES}${NC}"
 echo -e "Beta version:     ${BOLD}${INSTALL_BETA}${NC}"
 echo -e "Config location:  ${BOLD}${CONFIG_FILE}${NC}"
 
@@ -151,8 +183,10 @@ fi
 
 echo -e "\n${BLUE}►► Starting installation...${NC}\n"
 
-# Set timezone
-set_timezone "$TIMEZONE"
+# Set timezone (only on fresh install)
+if [ "$KEEP_CONFIG" != "y" ]; then
+  set_timezone "$TIMEZONE"
+fi
 
 # Run OS updates if requested
 if [ "$DO_UPDATES" == "y" ]; then
@@ -229,28 +263,33 @@ if [ -f "$OLD_CONFIG" ] && [ ! -f "$CONFIG_FILE" ]; then
   echo -e "${GREEN}✓ Config migrated to ${CONFIG_FILE}${NC}"
 fi
 
-# Backup existing config if present
-if [ -f "$CONFIG_FILE" ]; then
-  echo -e "${BLUE}►► Backing up existing configuration...${NC}"
-  file_backup "$CONFIG_FILE"
+# Handle configuration based on update vs fresh install
+if [ "$KEEP_CONFIG" == "y" ]; then
+  echo -e "${GREEN}✓ Keeping existing configuration${NC}"
+else
+  # Backup existing config if present (fresh install will overwrite)
+  if [ -f "$CONFIG_FILE" ]; then
+    echo -e "${BLUE}►► Backing up existing configuration...${NC}"
+    file_backup "$CONFIG_FILE"
+  fi
+
+  # Generate configuration file using jq (minimal config, app fills defaults)
+  echo -e "${BLUE}►► Generating configuration file...${NC}"
+  jq -n \
+    --arg station_name "$STATION_NAME" \
+    --arg username "$WEB_USERNAME" \
+    --arg password "$WEB_PASSWORD" \
+    --argjson port "$WEB_PORT" \
+    '{
+      system: { port: $port, username: $username, password: $password },
+      web: { station_name: $station_name }
+    }' > "$CONFIG_FILE"
+
+  # Set proper ownership and permissions
+  chown encoder:encoder "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  echo -e "${GREEN}✓ Configuration saved to ${CONFIG_FILE}${NC}"
 fi
-
-# Generate configuration file using jq (minimal config, app fills defaults)
-echo -e "${BLUE}►► Generating configuration file...${NC}"
-jq -n \
-  --arg station_name "$STATION_NAME" \
-  --arg username "$WEB_USERNAME" \
-  --arg password "$WEB_PASSWORD" \
-  --argjson port "$WEB_PORT" \
-  '{
-    system: { port: $port, username: $username, password: $password },
-    web: { station_name: $station_name }
-  }' > "$CONFIG_FILE"
-
-# Set proper ownership and permissions
-chown encoder:encoder "$CONFIG_FILE"
-chmod 600 "$CONFIG_FILE"
-echo -e "${GREEN}✓ Configuration saved to ${CONFIG_FILE}${NC}"
 
 # Download and install systemd service
 file_download "$ENCODER_SERVICE_URL" "$SERVICE_PATH" "systemd service"
@@ -291,18 +330,31 @@ fi
 # =============================================================================
 
 echo -e "\n${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}✓ Installation complete!${NC}"
+if [ "$KEEP_CONFIG" == "y" ]; then
+  echo -e "${GREEN}✓ Update complete!${NC}"
+else
+  echo -e "${GREEN}✓ Installation complete!${NC}"
+fi
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-echo -e "\n${BOLD}Web Interface${NC}"
-echo -e "  URL:      ${BOLD}http://${FIRST_IP}:${WEB_PORT}${NC}"
-echo -e "  Username: ${BOLD}${WEB_USERNAME}${NC}"
-echo -e "  Password: ${BOLD}(as configured)${NC}"
+# Read port from config for display (works for both update and fresh install)
+DISPLAY_PORT=$(jq -r '.system.port // 8080' "$CONFIG_FILE" 2>/dev/null || echo "8080")
 
-echo -e "\n${BOLD}Next Steps${NC}"
-echo -e "  1. Open the web interface in your browser"
-echo -e "  2. Select your audio input device in Settings"
-echo -e "  3. Add at least one SRT output destination"
+echo -e "\n${BOLD}Web Interface${NC}"
+echo -e "  URL:      ${BOLD}http://${FIRST_IP}:${DISPLAY_PORT}${NC}"
+if [ "$KEEP_CONFIG" == "y" ]; then
+  echo -e "  Credentials: ${BOLD}(as previously configured)${NC}"
+else
+  echo -e "  Username: ${BOLD}${WEB_USERNAME}${NC}"
+  echo -e "  Password: ${BOLD}(as configured)${NC}"
+fi
+
+if [ "$KEEP_CONFIG" != "y" ]; then
+  echo -e "\n${BOLD}Next Steps${NC}"
+  echo -e "  1. Open the web interface in your browser"
+  echo -e "  2. Select your audio input device in Settings"
+  echo -e "  3. Add at least one SRT output destination"
+fi
 
 echo -e "\n${BOLD}Useful Commands${NC}"
 echo -e "  View logs:      ${BOLD}journalctl -u encoder -f${NC}"

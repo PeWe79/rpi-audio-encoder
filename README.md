@@ -48,6 +48,21 @@ The web interface will be available at `http://<raspberry-pi-ip>:8080`
 
 **Default credentials:** `admin` / `encoder`
 
+## Updating
+
+Run the same installer script to update to the latest version:
+
+```bash
+sudo su
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/oszuidwest/zwfm-encoder/main/deploy/install.sh)"
+```
+
+The installer detects existing installations and asks whether to:
+- **Update only** - Downloads the latest binary while preserving your configuration
+- **Fresh install** - Overwrites configuration (existing config is backed up)
+
+The web interface shows a notification when updates are available.
+
 ## Audio Input
 
 Connect the digital output of your audio processor to the HiFiBerry input.
