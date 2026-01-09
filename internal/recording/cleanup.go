@@ -17,19 +17,13 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// startCleanupScheduler starts the daily cleanup scheduler.
+// startCleanupScheduler starts the hourly cleanup scheduler.
 func (m *Manager) startCleanupScheduler() {
 	go func() {
 		for {
-			// Calculate duration until next 03:00
-			now := time.Now()
-			next := time.Date(now.Year(), now.Month(), now.Day(), 3, 0, 0, 0, now.Location())
-			if now.After(next) {
-				next = next.Add(24 * time.Hour)
-			}
-			duration := next.Sub(now)
+			duration := util.TimeUntilNextHour(time.Now())
 
-			slog.Info("cleanup scheduler: next run scheduled", "at", next.Format(time.DateTime))
+			slog.Info("cleanup scheduler: next run scheduled", "in", duration.Round(time.Second))
 
 			select {
 			case <-time.After(duration):
@@ -48,7 +42,7 @@ func (m *Manager) runCleanup() {
 	recorders := slices.Collect(maps.Values(m.recorders))
 	m.mu.RUnlock()
 
-	slog.Info("cleanup: starting daily cleanup", "recorders", len(recorders))
+	slog.Info("cleanup: starting", "recorders", len(recorders))
 
 	for _, recorder := range recorders {
 		cfg := recorder.Config()
@@ -69,7 +63,7 @@ func (m *Manager) runCleanup() {
 		}
 	}
 
-	slog.Info("cleanup: daily cleanup completed")
+	slog.Info("cleanup: completed")
 }
 
 // cleanupLocalFiles removes local files older than retention days.
@@ -79,7 +73,7 @@ func (m *Manager) cleanupLocalFiles(recorder *GenericRecorder) {
 		return
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+	cutoff := util.RetentionCutoff(cfg.RetentionDays)
 	safeName := sanitizeFilename(cfg.Name)
 
 	entries, err := os.ReadDir(cfg.LocalPath)
@@ -148,7 +142,7 @@ func (m *Manager) cleanupS3Files(recorder *GenericRecorder) {
 		return
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+	cutoff := util.RetentionCutoff(cfg.RetentionDays)
 	safeName := sanitizeFilename(cfg.Name)
 	prefix := "recordings/" + safeName + "/"
 
