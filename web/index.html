@@ -314,7 +314,7 @@
         <!-- === Settings View ===
              Configuration interface with tabbed navigation.
 
-             Tabs: Audio | Notifications | About
+             Tabs: Audio | Notifications | Events | About
 
              Cancel/Save workflow:
              - Cancel restores original values, Save persists all changes
@@ -403,6 +403,30 @@
                             </div>
                         </div>
                     </div>
+                    <div class="section">
+                        <div class="section-header">
+                            <span class="icon-container" x-html="icons.key"></span>
+                            <h3>Recording API</h3>
+                        </div>
+                        <p class="section-desc">Authentication key for external recording control (POST /api/recordings/start, /api/recordings/stop).</p>
+                        <div class="form">
+                            <div class="group">
+                                <label for="api-key">API Key</label>
+                                <input id="api-key" type="text" readonly
+                                       :value="settingsForm?.recordingApiKey ? settingsForm.recordingApiKey : 'Not configured'"
+                                       :class="{ 'font-mono': settingsForm?.recordingApiKey }">
+                                <span class="input-hint" x-show="!settingsForm?.recordingApiKey">No API key configured. Click Regenerate to create one.</span>
+                            </div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0"
+                                    @click="copyApiKey()"
+                                    :disabled="!settingsForm?.recordingApiKey"
+                                    x-text="apiKeyCopied ? 'Copied!' : 'Copy'"></button>
+                            <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0"
+                                    @click="regenerateApiKey()">Regenerate</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Notifications Panel - Notification configuration for silence events
@@ -424,24 +448,6 @@
                             </div>
                         </div>
                         <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0" @click="sendTest('webhook')" :disabled="testStates.webhook.pending" x-text="testStates.webhook.text">Test</button>
-                    </div>
-                    <div class="section">
-                        <div class="section-header">
-                            <span class="icon-container" x-html="icons.file"></span>
-                            <h3>File Log</h3>
-                        </div>
-                        <p class="section-desc">Log silence events to a JSON Lines file.</p>
-                        <div class="form">
-                            <div class="group">
-                                <label for="silence-log-path">Log File Path</label>
-                                <input id="silence-log-path" type="text" placeholder="/var/log/encoder/silence.jsonl" x-model="settingsForm.silenceLogPath" @input="markSettingsDirty()" aria-describedby="silence-log-path-hint">
-                                <span id="silence-log-path-hint" class="input-hint">Leave empty to disable file logging.</span>
-                            </div>
-                        </div>
-                        <div class="btn-group">
-                            <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0" @click="sendTest('log')" :disabled="testStates.log.pending" x-text="testStates.log.text">Test</button>
-                            <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0" @click="viewSilenceLog()" :disabled="!settingsForm.silenceLogPath">View Log</button>
-                        </div>
                     </div>
                     <div class="section">
                         <div class="section-header">
@@ -514,42 +520,39 @@
                     </div>
                 </div>
 
-                <!-- Recording Panel - API key management
-                     Configure recorders from the dashboard -->
-                <div class="panel" role="tabpanel" id="panel-recording" aria-labelledby="tab-recording" x-show="settingsTab === 'recording'">
-                    <!-- API Key Section -->
+                <!-- Events Panel - Compact event log with stream identification -->
+                <div class="panel" role="tabpanel" id="panel-events" aria-labelledby="tab-events" x-show="settingsTab === 'events'" x-init="$watch('settingsTab', val => val === 'events' && loadEvents())">
                     <div class="section">
-                        <div class="section-header">
-                            <span class="icon-container" x-html="icons.key"></span>
-                            <h3>API Key</h3>
-                        </div>
-                        <p class="section-desc">Authentication key for REST API endpoints (/api/recordings/start, /api/recordings/stop).</p>
-                        <div class="form">
-                            <div class="group">
-                                <label for="api-key">API Key</label>
-                                <input id="api-key" type="text" readonly
-                                       :value="settingsForm?.recordingApiKey ? settingsForm.recordingApiKey : 'Not configured'"
-                                       :class="{ 'font-mono': settingsForm?.recordingApiKey }">
-                                <span class="input-hint" x-show="!settingsForm?.recordingApiKey">No API key configured. Click Regenerate to create one.</span>
+                        <div class="event-toolbar">
+                            <div class="event-filter-pills">
+                                <button type="button" class="filter-pill" :class="{ active: eventFilter === '' }" @click="eventFilter = ''; loadEvents(true)">All</button>
+                                <button type="button" class="filter-pill" :class="{ active: eventFilter === 'stream' }" @click="eventFilter = 'stream'; loadEvents(true)">Streams</button>
+                                <button type="button" class="filter-pill" :class="{ active: eventFilter === 'silence' }" @click="eventFilter = 'silence'; loadEvents(true)">Silence</button>
+                                <button type="button" class="filter-pill" :class="{ active: eventFilter === 'recorder' }" @click="eventFilter = 'recorder'; loadEvents(true)">Recorders</button>
                             </div>
-                        </div>
-                        <div class="btn-group">
-                            <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0"
-                                    @click="copyApiKey()"
-                                    :disabled="!settingsForm?.recordingApiKey"
-                                    x-text="apiKeyCopied ? 'Copied!' : 'Copy'"></button>
-                            <button class="btn" data-variant="secondary" data-size="test" type="button" tabindex="0"
-                                    @click="regenerateApiKey()">Regenerate</button>
+                            <span class="event-count" x-show="events.length > 0" x-text="events.length + ' events'"></span>
                         </div>
                     </div>
-
-                    <!-- Info Section -->
-                    <div class="section">
-                        <div class="section-header">
-                            <span class="icon-container" x-html="icons.info"></span>
-                            <h3>Recorder Configuration</h3>
+                    <div class="section section--flush">
+                        <div class="event-list" x-show="events.length > 0">
+                            <template x-for="(event, index) in events" :key="index">
+                                <article class="event-item" :data-severity="getEventSeverity(event.type)">
+                                    <div class="event-header">
+                                        <span class="event-stream-badge" :style="getStreamBadgeStyle(event)" x-text="getStreamBadgeText(event)"></span>
+                                        <span class="event-label" x-text="getEventLabel(event.type)"></span>
+                                        <time class="event-time" :datetime="event.ts" :title="new Date(event.ts).toLocaleString('nl-NL')" x-text="formatRelativeTime(event.ts)"></time>
+                                    </div>
+                                    <p class="event-detail" x-show="getEventDetail(event)" x-text="getEventDetail(event)"></p>
+                                </article>
+                            </template>
                         </div>
-                        <p class="section-desc">Add and configure recorders from the dashboard. Each recorder can have its own S3 storage, codec, and rotation settings.</p>
+                        <div class="event-empty" x-show="events.length === 0 && !eventsLoading">
+                            <p>No events yet</p>
+                        </div>
+                        <div class="event-loading" x-show="eventsLoading">
+                            <p>Loading...</p>
+                        </div>
+                        <button type="button" class="event-load-more" x-show="eventsHasMore && !eventsLoading" @click="loadMoreEvents()">Load older events</button>
                     </div>
                 </div>
 
@@ -922,53 +925,6 @@
                             Delete Recorder
                         </button>
                     </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- === Silence Log Modal ===
-             Broadcast console style log viewer displaying silence events.
-             Dark theme with LED indicators and monospace data presentation. -->
-        <div class="modal" x-show="silenceLogModal.visible" x-cloak>
-            <div class="overlay" @click.self="handleSilenceLogClose()" x-transition:enter.duration.200ms>
-                <div class="content" role="dialog" aria-modal="true" aria-labelledby="silence-log-title">
-                    <header class="header">
-                        <h2 id="silence-log-title">Silence Log</h2>
-                        <button class="icon-btn" data-variant="close" type="button" tabindex="0" aria-label="Close" @click="handleSilenceLogClose()">
-                            <span class="icon-container" x-html="icons.close"></span>
-                        </button>
-                    </header>
-                    <div class="body log">
-                        <div class="loading" x-show="silenceLogModal.loading">
-                            Loading events...
-                        </div>
-                        <div class="alert" role="alert" x-show="!silenceLogModal.loading && silenceLogModal.error">
-                            <span class="icon-container" x-html="icons.warning"></span>
-                            <span x-text="silenceLogModal.error"></span>
-                        </div>
-                        <div class="empty-state" x-show="!silenceLogModal.loading && !silenceLogModal.error && silenceLogModal.entries.length === 0">
-                            No events recorded
-                        </div>
-                        <div class="outputs" x-show="!silenceLogModal.loading && !silenceLogModal.error && silenceLogModal.entries.length > 0">
-                            <template x-for="entry in silenceLogModal.entries" :key="entry.timestamp">
-                                <div class="item" x-data="{ e: formatLogEntry(entry) }">
-                                    <div class="row">
-                                        <span class="dot" :class="e.stateClass"></span>
-                                        <span class="host" x-text="e.event"></span>
-                                    </div>
-                                    <div class="details">
-                                        <span class="codec" x-text="e.levels" x-show="e.levels"></span>
-                                        <span class="codec" x-text="e.threshold"></span>
-                                        <span class="status" :class="e.stateClass" x-text="e.time"></span>
-                                    </div>
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-                    <footer class="footer">
-                        <span class="path" x-show="silenceLogModal.path" x-text="silenceLogModal.path"></span>
-                        <button class="btn" data-variant="secondary" type="button" tabindex="0" @click="handleSilenceLogRefresh()" :disabled="silenceLogModal.loading">Refresh</button>
-                    </footer>
                 </div>
             </div>
         </div>

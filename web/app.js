@@ -60,7 +60,6 @@ const API = {
     RECORDERS: '/api/recorders',
     RECORDERS_TEST_S3: '/api/recorders/test-s3',
     NOTIFICATIONS_TEST: '/api/notifications/test',
-    NOTIFICATIONS_LOG: '/api/notifications/log',
     RECORDING_REGENERATE_KEY: '/api/recording/regenerate-key',
 };
 
@@ -136,7 +135,7 @@ document.addEventListener('alpine:init', () => {
         settingsTabs: [
             { id: 'audio', label: 'Audio', icon: 'audio' },
             { id: 'notifications', label: 'Notifications', icon: 'email' },
-            { id: 'recording', label: 'Recording', icon: 'microphone' },
+            { id: 'events', label: 'Events', icon: 'list' },
             { id: 'about', label: 'About', icon: 'info' }
         ],
 
@@ -163,6 +162,13 @@ document.addEventListener('alpine:init', () => {
         recorderForm: { ...DEFAULT_RECORDER, id: '' },
         recorderFormDirty: false,
 
+        // Event history (all event types: stream_* and silence_*)
+        events: [],
+        eventFilter: '',
+        eventsLoading: false,
+        eventsHasMore: false,
+        eventsOffset: 0,
+
         devices: [],
         levels: { ...DEFAULT_LEVELS },
         vuMode: localStorage.getItem('vuMode') || 'peak',
@@ -179,7 +185,6 @@ document.addEventListener('alpine:init', () => {
             silence_recovery_ms: 5000,
             silence_dump: { enabled: true, retention_days: 7 },
             webhook_url: '',
-            log_path: '',
             zabbix_server: '',
             zabbix_port: 10051,
             zabbix_host: '',
@@ -203,7 +208,6 @@ document.addEventListener('alpine:init', () => {
             silenceRecovery: 5,
             silenceDump: { enabled: true, retentionDays: 7 },
             silenceWebhook: '',
-            silenceLogPath: '',
             zabbix: { server: '', port: 10051, host: '', key: '' },
             graph: { tenantId: '', clientId: '', clientSecret: '', fromAddress: '', recipients: '' },
             recordingApiKey: '',
@@ -221,7 +225,6 @@ document.addEventListener('alpine:init', () => {
         // Notification test state (unified object for all test types)
         testStates: {
             webhook: { pending: false, text: 'Test' },
-            log: { pending: false, text: 'Test' },
             email: { pending: false, text: 'Test' },
             zabbix: { pending: false, text: 'Test' },
             recorderS3: { pending: false, text: 'Test Connection' }
@@ -229,14 +232,6 @@ document.addEventListener('alpine:init', () => {
 
         // API key copy feedback
         apiKeyCopied: false,
-
-        silenceLogModal: {
-            visible: false,
-            loading: false,
-            entries: [],
-            path: '',
-            error: ''
-        },
 
         banner: {
             visible: false,
@@ -347,10 +342,7 @@ document.addEventListener('alpine:init', () => {
 
             // Escape: Close views/modals
             if (event.key === 'Escape') {
-                if (this.silenceLogModal.visible) {
-                    this.handleSilenceLogClose();
-                    event.preventDefault();
-                } else if (this.view === 'settings') {
+                if (this.view === 'settings') {
                     this.cancelSettings();
                     event.preventDefault();
                 } else if (this.view === 'stream-form' || this.view === 'recorder-form') {
@@ -674,7 +666,6 @@ document.addEventListener('alpine:init', () => {
                     retentionDays: this.config.silence_dump?.retention_days ?? 7
                 },
                 silenceWebhook: this.config.webhook_url || '',
-                silenceLogPath: this.config.log_path || '',
                 zabbix: {
                     server: this.config.zabbix_server || '',
                     port: this.config.zabbix_port || 10051,
@@ -728,7 +719,6 @@ document.addEventListener('alpine:init', () => {
                         silence_dump_enabled: this.config.silence_dump.enabled,
                         silence_dump_retention_days: this.config.silence_dump.retention_days,
                         webhook_url: this.config.webhook_url,
-                        log_path: this.config.log_path,
                         zabbix_server: this.config.zabbix_server,
                         zabbix_port: this.config.zabbix_port,
                         zabbix_host: this.config.zabbix_host,
@@ -777,7 +767,6 @@ document.addEventListener('alpine:init', () => {
                 silence_dump_enabled: form.silenceDump.enabled,
                 silence_dump_retention_days: form.silenceDump.retentionDays,
                 webhook_url: form.silenceWebhook,
-                log_path: form.silenceLogPath,
                 zabbix_server: form.zabbix.server,
                 zabbix_port: form.zabbix.port,
                 zabbix_host: form.zabbix.host,
@@ -1309,6 +1298,207 @@ document.addEventListener('alpine:init', () => {
         },
 
         /**
+         * Loads events from the API (all types: stream_* and silence_*).
+         * @param {boolean} reset - If true, resets pagination and replaces events
+         */
+        async loadEvents(reset = true) {
+            if (reset) {
+                this.eventsOffset = 0;
+                this.events = [];
+            }
+            this.eventsLoading = true;
+            try {
+                const params = new URLSearchParams({ limit: '50', offset: this.eventsOffset.toString() });
+                if (this.eventFilter) {
+                    params.set('type', this.eventFilter);
+                }
+                const response = await fetch(`/api/events?${params}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const newEvents = (data.events || []).map(e => ({ ...e, expanded: false }));
+                    if (reset) {
+                        this.events = newEvents;
+                    } else {
+                        this.events = [...this.events, ...newEvents];
+                    }
+                    this.eventsHasMore = data.has_more || false;
+                }
+            } catch (error) {
+                console.error('Failed to load events:', error);
+            } finally {
+                this.eventsLoading = false;
+            }
+        },
+
+        /**
+         * Loads more events (pagination).
+         */
+        async loadMoreEvents() {
+            this.eventsOffset += 50;
+            await this.loadEvents(false);
+        },
+
+        /**
+         * Formats an event timestamp for display.
+         * @param {string} ts - ISO timestamp
+         * @returns {string} Formatted time string
+         */
+        formatEventTime(ts) {
+            if (!ts) return '';
+            const date = new Date(ts);
+            return date.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                + ' ' + date.toLocaleDateString('nl-NL', { day: '2-digit', month: '2-digit' });
+        },
+
+        /**
+         * Formats a timestamp as relative time (e.g., "2m ago", "1h ago").
+         * @param {string} ts - ISO timestamp
+         * @returns {string} Relative time string
+         */
+        formatRelativeTime(ts) {
+            if (!ts) return '';
+            const now = Date.now();
+            const then = new Date(ts).getTime();
+            const diff = now - then;
+
+            const seconds = Math.floor(diff / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+
+            if (seconds < 60) return 'just now';
+            if (minutes < 60) return `${minutes}m ago`;
+            if (hours < 24) return `${hours}h ago`;
+            if (days === 1) return 'yesterday';
+            return `${days}d ago`;
+        },
+
+        /**
+         * Gets the severity level for an event type.
+         * @param {string} type - Event type
+         * @returns {string} Severity: 'error', 'warning', 'success', or 'info'
+         */
+        getEventSeverity(type) {
+            if (type === 'stream_error') return 'error';
+            if (type === 'stream_retry') return 'warning';
+            if (type === 'stream_stable') return 'success';
+            if (type === 'silence_start') return 'warning';
+            if (type === 'silence_end') return 'success';
+            if (type === 'recorder_error' || type === 'upload_failed') return 'error';
+            if (type === 'upload_completed' || type === 'cleanup_completed') return 'success';
+            return 'info';
+        },
+
+        /**
+         * Gets a short label for an event type.
+         * @param {string} type - Event type
+         * @returns {string} Short label
+         */
+        getEventLabel(type) {
+            const labels = {
+                'stream_started': 'Started',
+                'stream_stable': 'Connected',
+                'stream_error': 'Error',
+                'stream_retry': 'Retry',
+                'stream_stopped': 'Stopped',
+                'silence_start': 'Silence',
+                'silence_end': 'Recovered',
+                'recorder_started': 'Started',
+                'recorder_stopped': 'Stopped',
+                'recorder_error': 'Error',
+                'recorder_file': 'New File',
+                'upload_queued': 'Upload Queued',
+                'upload_completed': 'Uploaded',
+                'upload_failed': 'Upload Failed',
+                'cleanup_completed': 'Cleanup'
+            };
+            return labels[type] || type;
+        },
+
+        /**
+         * Gets the detail text for an event (error message, stream name, etc.).
+         * @param {Object} event - Event object
+         * @returns {string} Detail text
+         */
+        getEventDetail(event) {
+            const details = event.details || {};
+            const streamName = details.stream_name || '';
+
+            if (event.type === 'stream_error') {
+                return details.error || 'Unknown error';
+            }
+            if (event.type === 'stream_retry') {
+                const retryNum = details.retry ? `Retry #${details.retry}` : '';
+                const error = details.error || '';
+                return [retryNum, error].filter(Boolean).join(' — ');
+            }
+            if (event.type === 'silence_start') {
+                if (details.level_left_db !== undefined) {
+                    return `L: ${details.level_left_db.toFixed(1)}dB  R: ${details.level_right_db.toFixed(1)}dB`;
+                }
+                return '';
+            }
+            if (event.type === 'silence_end') {
+                return details.duration_ms ? `Duration: ${formatSmartDuration(details.duration_ms)}` : '';
+            }
+            // Recorder events
+            if (event.type === 'recorder_error' || event.type === 'upload_failed') {
+                return details.error || 'Unknown error';
+            }
+            if (event.type === 'recorder_file' || event.type === 'upload_queued' || event.type === 'upload_completed') {
+                const filename = details.filename || '';
+                const codec = details.codec || '';
+                return [filename, codec.toUpperCase()].filter(Boolean).join(' — ');
+            }
+            if (event.type === 'cleanup_completed') {
+                const count = details.files_deleted || 0;
+                const storage = details.storage_type || '';
+                return `${count} files deleted (${storage})`;
+            }
+            if (event.type === 'recorder_started' || event.type === 'recorder_stopped') {
+                const codec = details.codec ? details.codec.toUpperCase() : '';
+                const mode = details.storage_mode || '';
+                const modeLabel = mode === 'both' ? 'Local + S3' : mode === 's3' ? 'S3' : mode === 'local' ? 'Local' : '';
+                return [codec, modeLabel].filter(Boolean).join(' — ');
+            }
+            // For started/stable/stopped, show stream name
+            return streamName;
+        },
+
+        /**
+         * Gets the text for stream badge.
+         * @param {Object} event - Event object
+         * @returns {string} Short stream identifier
+         */
+        getStreamBadgeText(event) {
+            // Silence events show "Audio" (they're system-wide, not stream-specific)
+            if (event.type?.startsWith('silence_')) {
+                return 'Audio';
+            }
+            // Recorder events show recorder name
+            if (event.type?.startsWith('recorder_') || event.type?.startsWith('upload_') || event.type === 'cleanup_completed') {
+                const details = event.details || {};
+                const name = details.recorder_name || 'Recorder';
+                return name.length > 8 ? name.slice(0, 8) : name;
+            }
+            // Stream events show stream name (shortened if needed)
+            const details = event.details || {};
+            const name = details.stream_name || event.stream_id || 'Stream';
+            // Return first part if it's a compound name, or truncate
+            return name.length > 8 ? name.slice(0, 8) : name;
+        },
+
+        /**
+         * Gets inline style for stream badge.
+         * @param {Object} event - Event object
+         * @returns {string} CSS style string
+         */
+        getStreamBadgeStyle() {
+            // All badges get neutral gray style
+            return 'background: var(--neutral-200); color: var(--neutral-600);';
+        },
+
+        /**
          * Triggers a notification test via REST API.
          * Uses form values (unsaved) for testing.
          *
@@ -1324,8 +1514,6 @@ document.addEventListener('alpine:init', () => {
             if (this.settingsForm) {
                 if (type === 'webhook') {
                     payload.webhook_url = this.settingsForm.silenceWebhook;
-                } else if (type === 'log') {
-                    payload.log_path = this.settingsForm.silenceLogPath;
                 } else if (type === 'email') {
                     payload.graph_tenant_id = this.settingsForm.graph.tenantId;
                     payload.graph_client_id = this.settingsForm.graph.clientId;
@@ -1414,51 +1602,6 @@ document.addEventListener('alpine:init', () => {
         },
 
         /**
-         * Opens the silence log modal and fetches log entries via REST API.
-         */
-        async viewSilenceLog() {
-            this.silenceLogModal.visible = true;
-            this.silenceLogModal.loading = true;
-            this.silenceLogModal.entries = [];
-            this.silenceLogModal.error = '';
-
-            await this.fetchSilenceLog();
-        },
-
-        handleSilenceLogClose() {
-            this.silenceLogModal.visible = false;
-        },
-
-        async handleSilenceLogRefresh() {
-            this.silenceLogModal.loading = true;
-            await this.fetchSilenceLog();
-        },
-
-        /**
-         * Fetches silence log entries from REST API.
-         */
-        async fetchSilenceLog() {
-            try {
-                const response = await fetch(API.NOTIFICATIONS_LOG);
-                const result = await response.json();
-
-                this.silenceLogModal.loading = false;
-                if (response.ok) {
-                    this.silenceLogModal.entries = result.entries || [];
-                    this.silenceLogModal.path = result.path || '';
-                    this.silenceLogModal.error = '';
-                } else {
-                    this.silenceLogModal.entries = [];
-                    this.silenceLogModal.error = result.error || 'Unknown error';
-                }
-            } catch (err) {
-                this.silenceLogModal.loading = false;
-                this.silenceLogModal.entries = [];
-                this.silenceLogModal.error = err.message;
-            }
-        },
-
-        /**
          * Shows an alert banner notification.
          * Clears any existing auto-hide timeout to prevent race conditions.
          * @param {string} message - Message to display
@@ -1535,50 +1678,6 @@ document.addEventListener('alpine:init', () => {
                 if (toast.timeoutId) clearTimeout(toast.timeoutId);
             }
             this.toasts = [];
-        },
-
-        /**
-         * Formats a silence log entry for display.
-         * For "ended" events, duration is the key metric (total silence time).
-         * For "started" events, duration is just detection delay (not shown).
-         * @param {Object} entry - Log entry with timestamp, event, duration_ms, threshold_db, level_left_db, level_right_db
-         * @returns {Object} Formatted entry with human-readable values
-         */
-        formatLogEntry(entry) {
-            const date = new Date(entry.timestamp);
-            const isEnd = entry.event === 'silence_end';
-            const isStart = entry.event === 'silence_start';
-            const isTest = entry.event === 'test';
-
-            // For ended events, show duration prominently in the event name
-            let eventText = 'Unknown event';
-            if (isEnd) {
-                const dur = entry.duration_ms > 0 ? formatSmartDuration(entry.duration_ms) : '';
-                eventText = dur ? `Silence ended: ${dur}` : 'Silence ended';
-            } else if (isStart) {
-                eventText = 'Silence detected';
-            } else if (isTest) {
-                eventText = 'Test entry';
-            }
-
-            // Map event type to state class
-            let stateClass = 'state-stopped';
-            if (isStart) stateClass = 'state-warning';
-            else if (isEnd) stateClass = 'state-success';
-
-            // Format audio levels with context
-            const hasLevels = entry.level_left_db !== undefined && entry.level_right_db !== undefined;
-            const levels = hasLevels
-                ? `Level: L ${entry.level_left_db.toFixed(1)} / R ${entry.level_right_db.toFixed(1)} dB`
-                : '';
-
-            return {
-                time: date.toLocaleString(),
-                event: eventText,
-                stateClass,
-                threshold: `Threshold: ${entry.threshold_db.toFixed(0)} dB`,
-                levels
-            };
         }
     }));
 });

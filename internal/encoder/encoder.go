@@ -16,6 +16,7 @@ import (
 
 	"github.com/oszuidwest/zwfm-encoder/internal/audio"
 	"github.com/oszuidwest/zwfm-encoder/internal/config"
+	"github.com/oszuidwest/zwfm-encoder/internal/eventlog"
 	"github.com/oszuidwest/zwfm-encoder/internal/notify"
 	"github.com/oszuidwest/zwfm-encoder/internal/recording"
 	"github.com/oszuidwest/zwfm-encoder/internal/silencedump"
@@ -24,7 +25,6 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// LevelUpdateSamples is the number of samples to process between level updates.
 const LevelUpdateSamples = 12000
 
 // ErrNoAudioInput is returned when no audio input device is configured.
@@ -49,6 +49,7 @@ type Encoder struct {
 	streamManager       *streaming.Manager
 	recordingManager    *recording.Manager
 	silenceDumpManager  *silencedump.Manager
+	eventLogger         *eventlog.Logger
 	sourceCmd           *exec.Cmd
 	sourceCancel        context.CancelFunc
 	sourceStdout        io.ReadCloser
@@ -68,7 +69,7 @@ type Encoder struct {
 }
 
 // New creates a new Encoder with the given configuration and FFmpeg binary path.
-func New(cfg *config.Config, ffmpegPath string) *Encoder {
+func New(cfg *config.Config, ffmpegPath string) (*Encoder, error) {
 	graphCfg := cfg.GraphConfig()
 	snap := cfg.Snapshot()
 
@@ -84,11 +85,25 @@ func New(cfg *config.Config, ffmpegPath string) *Encoder {
 		notifier.OnDumpReady,
 	)
 
-	return &Encoder{
+	// Create event logger with platform-specific path
+	eventLogPath := eventlog.DefaultLogPath(snap.WebPort)
+	logger, err := eventlog.NewLogger(eventLogPath)
+	if err != nil {
+		return nil, fmt.Errorf("create event logger at %s: %w", eventLogPath, err)
+	}
+
+	// Wire event logger to notifier for silence event logging
+	notifier.SetEventLogger(logger)
+
+	// Create stream manager and wire up event callback
+	streamMgr := streaming.NewManager(ffmpegPath)
+
+	e := &Encoder{
 		config:              cfg,
 		ffmpegPath:          ffmpegPath,
-		streamManager:       streaming.NewManager(ffmpegPath),
+		streamManager:       streamMgr,
 		silenceDumpManager:  dumpManager,
+		eventLogger:         logger,
 		state:               types.StateStopped,
 		backoff:             util.NewBackoff(types.InitialRetryDelay, types.MaxRetryDelay),
 		silenceDetect:       audio.NewSilenceDetector(),
@@ -96,6 +111,37 @@ func New(cfg *config.Config, ffmpegPath string) *Encoder {
 		peakHolder:          audio.NewPeakHolder(),
 		secretExpiryChecker: notify.NewSecretExpiryChecker(&graphCfg),
 	}
+
+	// Set event callback on stream manager
+	streamMgr.SetEventCallback(e.onStreamEvent, e.getStreamName)
+
+	return e, nil
+}
+
+func (e *Encoder) onStreamEvent(streamID, streamName, eventType, message, errMsg string, retryCount, maxRetries int) {
+	if e.eventLogger == nil {
+		return
+	}
+
+	if err := e.eventLogger.LogStream(eventlog.EventType(eventType), streamID, streamName, message, errMsg, retryCount, maxRetries); err != nil {
+		slog.Warn("failed to log stream event", "error", err)
+	}
+}
+
+func (e *Encoder) getStreamName(streamID string) string {
+	stream := e.config.Stream(streamID)
+	if stream == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", stream.Host, stream.Port)
+}
+
+// EventLogPath returns the path to the event log file.
+func (e *Encoder) EventLogPath() string {
+	if e.eventLogger == nil {
+		return ""
+	}
+	return e.eventLogger.Path()
 }
 
 // InitRecording prepares the recording manager for use.
@@ -105,7 +151,7 @@ func (e *Encoder) InitRecording() error {
 
 	snap := e.config.Snapshot()
 
-	mgr, err := recording.NewManager(e.ffmpegPath, "", snap.RecordingMaxDurationMinutes)
+	mgr, err := recording.NewManager(e.ffmpegPath, "", snap.RecordingMaxDurationMinutes, e.eventLogger)
 	if err != nil {
 		return fmt.Errorf("create recording manager: %w", err)
 	}
@@ -321,7 +367,6 @@ func (e *Encoder) Stop() error {
 	return errors.Join(errs...)
 }
 
-// Restart restarts the encoder.
 func (e *Encoder) Restart() error {
 	if err := e.Stop(); err != nil {
 		return fmt.Errorf("stop: %w", err)
@@ -380,8 +425,6 @@ func (e *Encoder) GraphSecretExpiry() types.SecretExpiryInfo {
 }
 
 // InvalidateGraphSecretExpiryCache clears the cached secret expiry info.
-// Note: The Graph client in SilenceNotifier automatically detects config changes
-// and recreates itself when needed (same pattern as S3 client in recorders).
 func (e *Encoder) InvalidateGraphSecretExpiryCache() {
 	if e.secretExpiryChecker != nil {
 		graphCfg := e.config.GraphConfig()
@@ -389,14 +432,12 @@ func (e *Encoder) InvalidateGraphSecretExpiryCache() {
 	}
 }
 
-// UpdateSilenceConfig updates the silence detection settings.
 func (e *Encoder) UpdateSilenceConfig() {
 	if e.silenceDetect != nil {
 		e.silenceDetect.Reset()
 	}
 }
 
-// UpdateSilenceDumpConfig updates the silence dump capture settings.
 func (e *Encoder) UpdateSilenceDumpConfig() {
 	snap := e.config.Snapshot()
 	if e.silenceDumpManager != nil {
@@ -411,18 +452,13 @@ func (e *Encoder) TriggerTestWebhook() error {
 	return notify.SendTestWebhook(cfg.WebhookURL, cfg.StationName)
 }
 
-// TriggerTestLog writes a test log entry.
-func (e *Encoder) TriggerTestLog() error {
-	return notify.WriteTestLog(e.config.Snapshot().LogPath)
-}
-
 // TriggerTestZabbix sends a test notification to the configured Zabbix server.
 func (e *Encoder) TriggerTestZabbix() error {
 	cfg := e.config.Snapshot()
 	return notify.SendTestZabbix(cfg.ZabbixServer, cfg.ZabbixPort, cfg.ZabbixHost, cfg.ZabbixKey)
 }
 
-// runSourceLoop runs the audio capture process.
+// runSourceLoop manages the audio capture lifecycle with automatic retry and backoff.
 func (e *Encoder) runSourceLoop() {
 	for {
 		e.mu.Lock()
@@ -486,7 +522,7 @@ func (e *Encoder) runSourceLoop() {
 	}
 }
 
-// runSource executes the audio capture process.
+// runSource starts the audio capture process and blocks until it exits.
 func (e *Encoder) runSource() (string, error) {
 	audioInput := e.config.Snapshot().AudioInput
 	cmdName, args, err := audio.BuildCaptureCommand(audioInput, e.ffmpegPath)
@@ -549,7 +585,6 @@ func (e *Encoder) runSource() (string, error) {
 	return util.ExtractLastError(stderrBuf.String()), err
 }
 
-// startEnabledStreams starts all enabled streaming processes.
 func (e *Encoder) startEnabledStreams() {
 	// Start silence dump manager (cleanup scheduler)
 	if e.silenceDumpManager != nil {
@@ -574,7 +609,7 @@ func (e *Encoder) startEnabledStreams() {
 	}
 }
 
-// runDistributor delivers audio from the source to all streaming processes.
+// runDistributor reads PCM audio and distributes it to streams, recorders, and silence detection.
 func (e *Encoder) runDistributor() {
 	buf := make([]byte, 19200) // ~100ms of audio at 48kHz stereo
 
@@ -629,7 +664,6 @@ func (e *Encoder) runDistributor() {
 	}
 }
 
-// updateAudioLevels updates the current audio level readings.
 func (e *Encoder) updateAudioLevels(levels *audio.AudioLevels) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

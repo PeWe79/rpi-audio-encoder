@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/oszuidwest/zwfm-encoder/internal/eventlog"
 	"github.com/oszuidwest/zwfm-encoder/internal/ffmpeg"
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// GenericRecorder is a recorder that saves audio to files with optional S3 upload.
+// GenericRecorder saves audio to files with optional S3 upload.
 type GenericRecorder struct {
 	mu sync.RWMutex // Protects state, config, file paths
 
@@ -23,6 +24,7 @@ type GenericRecorder struct {
 	config             types.Recorder
 	ffmpegPath         string
 	maxDurationMinutes int // For on-demand mode (from global config)
+	eventLogger        *eventlog.Logger
 
 	tempDir   string
 	state     types.ProcessState
@@ -52,14 +54,13 @@ type GenericRecorder struct {
 	durationTimer *time.Timer
 }
 
-// NewGenericRecorder creates a new recorder with the given configuration.
-// S3 client is created lazily on first use (same pattern as Graph client).
-func NewGenericRecorder(cfg *types.Recorder, ffmpegPath, tempDir string, maxDurationMinutes int) (*GenericRecorder, error) {
+func NewGenericRecorder(cfg *types.Recorder, ffmpegPath, tempDir string, maxDurationMinutes int, eventLogger *eventlog.Logger) (*GenericRecorder, error) {
 	r := &GenericRecorder{
 		id:                 cfg.ID,
 		config:             *cfg,
 		ffmpegPath:         ffmpegPath,
 		maxDurationMinutes: maxDurationMinutes,
+		eventLogger:        eventLogger,
 		tempDir:            tempDir,
 		state:              types.ProcessStopped,
 		uploadQueue:        make(chan uploadRequest, 100),
@@ -69,29 +70,20 @@ func NewGenericRecorder(cfg *types.Recorder, ffmpegPath, tempDir string, maxDura
 	return r, nil
 }
 
-// ID returns the recorder's unique identifier.
 func (r *GenericRecorder) ID() string {
 	return r.id
 }
 
-// Config returns the recorder configuration.
 func (r *GenericRecorder) Config() types.Recorder {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.config
 }
 
-// s3ConfigKeyFrom returns a string key for comparing S3 configurations.
-// Used to detect when credentials change and client needs recreation.
-// Includes all fields baked into the S3 client at creation time:
-// - Endpoint, AccessKeyID, SecretAccessKey: client configuration
-// Bucket is NOT included as it's passed per-operation, not stored in client.
 func s3ConfigKeyFrom(cfg *types.Recorder) string {
 	return cfg.S3Endpoint + "|" + cfg.S3AccessKeyID + "|" + cfg.S3SecretAccessKey
 }
 
-// getOrCreateS3Client returns the cached S3 client, recreating if config changed.
-// This follows the same pattern as Graph client handling in notifications.
 func (r *GenericRecorder) getOrCreateS3Client() (*s3.Client, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -124,7 +116,6 @@ func (r *GenericRecorder) IsCurrentFile(path string) bool {
 	return r.currentFile == path
 }
 
-// Start begins recording.
 func (r *GenericRecorder) Start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -143,7 +134,6 @@ func (r *GenericRecorder) Start() error {
 	return nil
 }
 
-// startAsync validates paths and starts the encoder asynchronously.
 func (r *GenericRecorder) startAsync() {
 	// Read config values we need for validation
 	r.mu.RLock()
@@ -204,20 +194,47 @@ func (r *GenericRecorder) startAsync() {
 
 	r.state = types.ProcessRunning
 
-	slog.Info("recorder started", "id", r.id, "name", r.config.Name, "mode", r.config.RotationMode)
+	// Capture log params while holding lock
+	logParams := r.captureLogParamsLocked()
+	name := r.config.Name
+	mode := r.config.RotationMode
 	r.mu.Unlock()
+
+	slog.Info("recorder started", "id", r.id, "name", name, "mode", mode)
+	r.logEvent(eventlog.RecorderStarted, logParams)
 }
 
-// setError sets the recorder to error state with the given message.
 func (r *GenericRecorder) setError(msg string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.state = types.ProcessError
 	r.lastError = msg
 	slog.Error("recorder error", "id", r.id, "error", msg)
+
+	// Log to event log (capture params while holding lock)
+	p := r.captureLogParamsLocked()
+	p.Error = msg
+	r.logEvent(eventlog.RecorderError, p)
 }
 
-// Stop ends recording.
+// Must be called with r.mu held.
+func (r *GenericRecorder) captureLogParamsLocked() *eventlog.RecorderEventParams {
+	return &eventlog.RecorderEventParams{
+		RecorderName: r.config.Name,
+		Codec:        string(r.config.Codec),
+		StorageMode:  string(r.config.StorageMode),
+	}
+}
+
+func (r *GenericRecorder) logEvent(eventType eventlog.EventType, p *eventlog.RecorderEventParams) {
+	if r.eventLogger == nil {
+		return
+	}
+	if err := r.eventLogger.LogRecorder(eventType, p); err != nil {
+		slog.Warn("failed to log recorder event", "type", eventType, "error", err)
+	}
+}
+
 func (r *GenericRecorder) Stop() error {
 	r.mu.Lock()
 
@@ -263,13 +280,17 @@ func (r *GenericRecorder) Stop() error {
 	r.uploadStopCh = make(chan struct{})          // Reset for next start
 	r.uploadQueue = make(chan uploadRequest, 100) // Reset for next start
 	r.stopOnce = sync.Once{}                      // Reset Once for next start
+
+	// Capture log params while holding lock
+	logParams := r.captureLogParamsLocked()
+	name := r.config.Name
 	r.mu.Unlock()
 
-	slog.Info("recorder stopped", "id", r.id, "name", r.config.Name)
+	slog.Info("recorder stopped", "id", r.id, "name", name)
+	r.logEvent(eventlog.RecorderStopped, logParams)
 	return nil
 }
 
-// WriteAudio writes PCM audio data.
 func (r *GenericRecorder) WriteAudio(pcm []byte) error {
 	r.mu.RLock()
 	state := r.state
@@ -302,7 +323,6 @@ func (r *GenericRecorder) WriteAudio(pcm []byte) error {
 	return nil
 }
 
-// Status returns the current recorder status.
 func (r *GenericRecorder) Status() types.ProcessStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -320,8 +340,6 @@ func (r *GenericRecorder) IsRecording() bool {
 	return r.state == types.ProcessRunning
 }
 
-// UpdateConfig updates the recorder configuration.
-// S3 client recreation is handled lazily by getOrCreateS3Client on next use.
 func (r *GenericRecorder) UpdateConfig(cfg *types.Recorder) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -339,7 +357,7 @@ func (r *GenericRecorder) UpdateConfig(cfg *types.Recorder) error {
 	return nil
 }
 
-// startEncoderLocked starts the FFmpeg encoder process.
+// Must be called with r.mu held.
 func (r *GenericRecorder) startEncoderLocked() error {
 	r.startTime = time.Now()
 
@@ -392,10 +410,15 @@ func (r *GenericRecorder) startEncoderLocked() error {
 	r.result = result
 
 	slog.Info("recorder encoding started", "id", r.id, "file", filepath.Base(r.currentFile), "codec", r.config.Codec)
+
+	// Log new file event (already holding lock)
+	p := r.captureLogParamsLocked()
+	p.Filename = filepath.Base(r.currentFile)
+	r.logEvent(eventlog.RecorderFile, p)
 	return nil
 }
 
-// stopEncoderAndUpload stops the current encoder and handles the recorded file.
+// stopEncoderAndUpload gracefully stops FFmpeg with staged timeouts and queues the file for upload.
 func (r *GenericRecorder) stopEncoderAndUpload() {
 	// Cache values under lock to prevent race conditions
 	r.mu.Lock()
@@ -450,13 +473,13 @@ func (r *GenericRecorder) stopEncoderAndUpload() {
 	}
 }
 
-// scheduleRotationLocked schedules the next hourly rotation.
+// Must be called with r.mu held.
 func (r *GenericRecorder) scheduleRotationLocked() {
 	duration := util.TimeUntilNextHour(time.Now())
 	r.rotationTimer = time.AfterFunc(duration, r.rotateFile)
 }
 
-// rotateFile handles hourly file rotation.
+// rotateFile handles hourly file rotation, stopping the current encoder and starting a new one.
 func (r *GenericRecorder) rotateFile() {
 	r.mu.Lock()
 
@@ -496,7 +519,7 @@ func (r *GenericRecorder) rotateFile() {
 	r.mu.Unlock()
 }
 
-// scheduleDurationLimitLocked schedules auto-stop for on-demand recorders.
+// Must be called with r.mu held.
 func (r *GenericRecorder) scheduleDurationLimitLocked() {
 	duration := time.Duration(r.maxDurationMinutes) * time.Minute
 	r.durationTimer = time.AfterFunc(duration, func() {
@@ -507,21 +530,18 @@ func (r *GenericRecorder) scheduleDurationLimitLocked() {
 	})
 }
 
-// generateFilename creates a filename for the given timestamp.
 func (r *GenericRecorder) generateFilename(t time.Time) string {
 	ext := r.getFileExtension()
 	safeName := sanitizeFilename(r.config.Name)
 	return fmt.Sprintf("%s-%s.%s", safeName, t.Format("2006-01-02-15-04"), ext)
 }
 
-// generateS3Key creates the S3 object key for a recording file.
 func (r *GenericRecorder) generateS3Key(filename string) string {
 	// Prefix: recordings/{sanitized-recorder-name}/filename
 	safeName := sanitizeFilename(r.config.Name)
 	return fmt.Sprintf("recordings/%s/%s", safeName, filename)
 }
 
-// getFileExtension returns the file extension for the configured codec.
 func (r *GenericRecorder) getFileExtension() string {
 	switch r.config.Codec {
 	case types.CodecMP2:
@@ -537,7 +557,6 @@ func (r *GenericRecorder) getFileExtension() string {
 	}
 }
 
-// getContentType returns the MIME type for the configured codec.
 func (r *GenericRecorder) getContentType() string {
 	switch r.config.Codec {
 	case types.CodecMP2:
@@ -558,12 +577,10 @@ func (r *GenericRecorder) isS3Configured() bool {
 	return r.config.S3Bucket != "" && r.config.S3AccessKeyID != "" && r.config.S3SecretAccessKey != ""
 }
 
-// createS3Client creates an S3 client for this recorder.
 func (r *GenericRecorder) createS3Client() (*s3.Client, error) {
 	return createS3Client(RecorderToS3Config(&r.config))
 }
 
-// sanitizeFilename returns a safe filename from the given name.
 func sanitizeFilename(name string) string {
 	result := make([]byte, 0, len(name))
 	for i := 0; i < len(name); i++ {
@@ -580,7 +597,6 @@ func sanitizeFilename(name string) string {
 	return string(result)
 }
 
-// TestRecorderS3Connection tests S3 connectivity for a recorder configuration.
 func TestRecorderS3Connection(cfg *types.Recorder) error {
 	return TestS3Connection(RecorderToS3Config(cfg))
 }

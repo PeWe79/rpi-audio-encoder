@@ -13,11 +13,11 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/oszuidwest/zwfm-encoder/internal/eventlog"
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// startCleanupScheduler starts the hourly cleanup scheduler.
 func (m *Manager) startCleanupScheduler() {
 	go func() {
 		for {
@@ -36,7 +36,6 @@ func (m *Manager) startCleanupScheduler() {
 	}()
 }
 
-// runCleanup performs cleanup for all recorders.
 func (m *Manager) runCleanup() {
 	m.mu.RLock()
 	recorders := slices.Collect(maps.Values(m.recorders))
@@ -121,10 +120,11 @@ func (m *Manager) cleanupLocalFiles(recorder *GenericRecorder) {
 
 	if deleted > 0 {
 		slog.Info("cleanup: deleted local files", "id", cfg.ID, "count", deleted)
+		m.logCleanupEvent(cfg.Name, deleted, "local")
 	}
 }
 
-// cleanupS3Files removes S3 objects older than retention days.
+// cleanupS3Files removes S3 objects older than retention days using pagination.
 func (m *Manager) cleanupS3Files(recorder *GenericRecorder) {
 	cfg := recorder.Config()
 	if cfg.S3Bucket == "" {
@@ -204,5 +204,19 @@ func (m *Manager) cleanupS3Files(recorder *GenericRecorder) {
 
 	if deleted > 0 {
 		slog.Info("cleanup: deleted S3 objects", "id", cfg.ID, "count", deleted)
+		m.logCleanupEvent(cfg.Name, deleted, "s3")
+	}
+}
+
+func (m *Manager) logCleanupEvent(recorderName string, filesDeleted int, storageType string) {
+	if m.eventLogger == nil {
+		return
+	}
+	if err := m.eventLogger.LogRecorder(eventlog.CleanupCompleted, &eventlog.RecorderEventParams{
+		RecorderName: recorderName,
+		FilesDeleted: filesDeleted,
+		StorageType:  storageType,
+	}); err != nil {
+		slog.Warn("failed to log cleanup event", "error", err)
 	}
 }

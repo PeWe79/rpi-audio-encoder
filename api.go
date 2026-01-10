@@ -6,20 +6,18 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os"
 	"runtime"
-	"slices"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/oszuidwest/zwfm-encoder/internal/audio"
 	"github.com/oszuidwest/zwfm-encoder/internal/config"
+	"github.com/oszuidwest/zwfm-encoder/internal/eventlog"
 	"github.com/oszuidwest/zwfm-encoder/internal/notify"
 	"github.com/oszuidwest/zwfm-encoder/internal/recording"
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 )
 
-// writeJSON writes a JSON response with the given status code.
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -28,27 +26,23 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, data any) {
 	}
 }
 
-// writeError writes a JSON error response with the given status code.
 func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
 	s.writeJSON(w, status, map[string]string{"error": message})
 }
 
-// writeMessage writes a JSON response with a message.
 func (s *Server) writeMessage(w http.ResponseWriter, message string) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"message": message})
 }
 
-// writeNoContent writes a 204 No Content response.
 func (s *Server) writeNoContent(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// readJSON decodes JSON from the request body into v.
 func (s *Server) readJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-// maxRequestBodySize is the maximum allowed size for JSON request bodies (1MB).
+// maxRequestBodySize limits JSON request bodies to 1MB.
 const maxRequestBodySize = 1 << 20
 
 // parseJSON parses JSON from the request body into type T and reports whether parsing succeeded.
@@ -64,7 +58,6 @@ func parseJSON[T any](s *Server, w http.ResponseWriter, r *http.Request) (T, boo
 }
 
 // handleAPIConfig returns the full configuration for the frontend.
-// GET /api/config
 func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.Snapshot()
 
@@ -85,9 +78,6 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 
 		// Notifications - Webhook
 		WebhookURL: cfg.WebhookURL,
-
-		// Notifications - Log
-		LogPath: cfg.LogPath,
 
 		// Notifications - Zabbix
 		ZabbixServer: cfg.ZabbixServer,
@@ -114,7 +104,6 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPIDevices returns available audio devices.
-// GET /api/devices
 func (s *Server) handleAPIDevices(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"devices": audio.ListDevices(),
@@ -122,7 +111,6 @@ func (s *Server) handleAPIDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPISettings updates all settings atomically.
-// POST /api/settings
 func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseJSON[config.SettingsUpdate](s, w, r)
 	if !ok {
@@ -180,17 +168,13 @@ func (s *Server) handleAPISettings(w http.ResponseWriter, r *http.Request) {
 	s.writeNoContent(w)
 }
 
-// Stream API endpoints
-
 // handleListStreams returns all configured streams.
-// GET /api/streams
 func (s *Server) handleListStreams(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.Snapshot()
 	s.writeJSON(w, http.StatusOK, cfg.Streams)
 }
 
 // handleGetStream returns a single stream by ID.
-// GET /api/streams/{id}
 func (s *Server) handleGetStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	stream := s.config.Stream(id)
@@ -201,7 +185,7 @@ func (s *Server) handleGetStream(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, stream)
 }
 
-// StreamRequest is the request body for creating/updating streams.
+// StreamRequest contains fields for creating or updating streams.
 type StreamRequest struct {
 	Enabled    bool        `json:"enabled"`
 	Host       string      `json:"host"`
@@ -213,7 +197,6 @@ type StreamRequest struct {
 }
 
 // handleCreateStream creates a new stream.
-// POST /api/streams
 func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseJSON[StreamRequest](s, w, r)
 	if !ok {
@@ -246,7 +229,6 @@ func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateStream replaces a stream by ID.
-// PUT /api/streams/{id}
 func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	existing := s.config.Stream(id)
@@ -299,7 +281,6 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteStream deletes a stream by ID.
-// DELETE /api/streams/{id}
 func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if s.config.Stream(id) == nil {
@@ -320,17 +301,13 @@ func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 	s.writeNoContent(w)
 }
 
-// Recorder API endpoints
-
 // handleListRecorders returns all configured recorders.
-// GET /api/recorders
 func (s *Server) handleListRecorders(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.Snapshot()
 	s.writeJSON(w, http.StatusOK, cfg.Recorders)
 }
 
 // handleGetRecorder returns a single recorder by ID.
-// GET /api/recorders/{id}
 func (s *Server) handleGetRecorder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	recorder := s.config.Recorder(id)
@@ -341,7 +318,7 @@ func (s *Server) handleGetRecorder(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, recorder)
 }
 
-// RecorderRequest is the request body for creating/updating recorders.
+// RecorderRequest contains fields for creating or updating recorders.
 type RecorderRequest struct {
 	Name              string             `json:"name"`
 	Enabled           bool               `json:"enabled"`
@@ -357,7 +334,6 @@ type RecorderRequest struct {
 }
 
 // handleCreateRecorder creates a new recorder.
-// POST /api/recorders
 func (s *Server) handleCreateRecorder(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseJSON[RecorderRequest](s, w, r)
 	if !ok {
@@ -388,7 +364,6 @@ func (s *Server) handleCreateRecorder(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateRecorder replaces a recorder by ID.
-// PUT /api/recorders/{id}
 func (s *Server) handleUpdateRecorder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	existing := s.config.Recorder(id)
@@ -430,7 +405,6 @@ func (s *Server) handleUpdateRecorder(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteRecorder deletes a recorder by ID.
-// DELETE /api/recorders/{id}
 func (s *Server) handleDeleteRecorder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if s.config.Recorder(id) == nil {
@@ -448,8 +422,6 @@ func (s *Server) handleDeleteRecorder(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRecorderAction handles start/stop actions for a recorder.
-// POST /api/recorders/{id}/start
-// POST /api/recorders/{id}/stop
 func (s *Server) handleRecorderAction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	action := r.PathValue("action")
@@ -476,7 +448,7 @@ func (s *Server) handleRecorderAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// S3TestRequest is the request body for testing S3 connectivity.
+// S3TestRequest contains fields for testing S3 connectivity.
 type S3TestRequest struct {
 	Endpoint  string `json:"s3_endpoint"`
 	Bucket    string `json:"s3_bucket"`
@@ -485,7 +457,6 @@ type S3TestRequest struct {
 }
 
 // handleTestS3 tests S3 connectivity.
-// POST /api/recorders/test-s3
 func (s *Server) handleTestS3(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseJSON[S3TestRequest](s, w, r)
 	if !ok {
@@ -520,15 +491,10 @@ func (s *Server) handleTestS3(w http.ResponseWriter, r *http.Request) {
 	s.writeMessage(w, "S3 connection successful")
 }
 
-// Notification test endpoints
-
-// NotificationTestRequest is the request body for testing notifications.
+// NotificationTestRequest contains fields for testing notifications.
 type NotificationTestRequest struct {
 	// Webhook
 	WebhookURL string `json:"webhook_url,omitempty"`
-
-	// Log
-	LogPath string `json:"log_path,omitempty"`
 
 	// Email
 	GraphTenantID     string `json:"graph_tenant_id,omitempty"`
@@ -565,28 +531,6 @@ func (s *Server) handleAPITestWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeMessage(w, "Webhook test sent")
-}
-
-// handleAPITestLog tests log file notification.
-func (s *Server) handleAPITestLog(w http.ResponseWriter, r *http.Request) {
-	req, ok := parseJSON[NotificationTestRequest](s, w, r)
-	if !ok {
-		return
-	}
-
-	path := cmp.Or(req.LogPath, s.config.Snapshot().LogPath)
-
-	if path == "" {
-		s.writeError(w, http.StatusBadRequest, "No log path configured")
-		return
-	}
-
-	if err := notify.WriteTestLog(path); err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	s.writeMessage(w, "Test log entry written")
 }
 
 // handleAPITestEmail tests email notification.
@@ -667,69 +611,59 @@ func (s *Server) handleAPIRegenerateKey(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, map[string]string{"api_key": newKey})
 }
 
-// handleAPIViewLog returns the silence log entries.
-func (s *Server) handleAPIViewLog(w http.ResponseWriter, r *http.Request) {
-	logPath := s.config.LogPath()
+// handleAPIEvents returns events from the event log.
+func (s *Server) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
+	emptyResponse := map[string]any{
+		"events":   []eventlog.Event{},
+		"has_more": false,
+	}
+
+	// Parse limit parameter (default 50, max MaxReadLimit)
+	limit := 50
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = min(parsed, eventlog.MaxReadLimit)
+		}
+	}
+
+	// Parse offset parameter (default 0)
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if parsed, err := strconv.Atoi(offsetStr); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	// Parse type filter parameter
+	var filter eventlog.TypeFilter
+	switch r.URL.Query().Get("type") {
+	case "stream":
+		filter = eventlog.FilterStream
+	case "silence":
+		filter = eventlog.FilterSilence
+	case "recorder":
+		filter = eventlog.FilterRecorder
+	default:
+		filter = eventlog.FilterAll
+	}
+
+	// Get event log path from encoder
+	logPath := s.encoder.EventLogPath()
 	if logPath == "" {
-		s.writeError(w, http.StatusBadRequest, "Log file path not configured")
+		s.writeJSON(w, http.StatusOK, emptyResponse)
 		return
 	}
 
-	entries, err := readSilenceLog(logPath, 100)
+	// Read events from log file
+	eventList, hasMore, err := eventlog.ReadLast(logPath, limit, offset, filter)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("failed to read events", "error", err)
+		s.writeJSON(w, http.StatusOK, emptyResponse)
 		return
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"entries": entries,
-		"path":    logPath,
+		"events":   eventList,
+		"has_more": hasMore,
 	})
-}
-
-// readSilenceLog reads the last N entries from the silence log file.
-func readSilenceLog(logPath string, maxEntries int) ([]types.SilenceLogEntry, error) {
-	data, err := os.ReadFile(logPath)
-	if os.IsNotExist(err) {
-		return []types.SilenceLogEntry{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return []types.SilenceLogEntry{}, nil
-	}
-
-	ring := make([]types.SilenceLogEntry, maxEntries)
-	count := 0
-
-	for line := range strings.Lines(content) {
-		if line == "" {
-			continue
-		}
-		var entry types.SilenceLogEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			slog.Warn("failed to parse silence log entry", "line", line, "error", err)
-			continue
-		}
-		ring[count%maxEntries] = entry
-		count++
-	}
-
-	if count == 0 {
-		return []types.SilenceLogEntry{}, nil
-	}
-
-	size := min(count, maxEntries)
-	entries := make([]types.SilenceLogEntry, size)
-	start := count - size
-	for i := range size {
-		entries[i] = ring[(start+i)%maxEntries]
-	}
-
-	slices.Reverse(entries)
-
-	return entries, nil
 }

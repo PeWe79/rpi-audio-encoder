@@ -19,7 +19,6 @@ import (
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
 )
 
-// Configuration defaults are used when values are not specified.
 const (
 	DefaultWebPort                     = 8080
 	DefaultWebUsername                 = "admin"
@@ -34,7 +33,6 @@ const (
 	DefaultRecordingMaxDurationMinutes = 240 // 4 hours for on-demand recorders
 )
 
-// SystemConfig represents system-level settings such as server port and credentials.
 type SystemConfig struct {
 	FFmpegPath string `json:"ffmpeg_path"` // Path to FFmpeg binary (empty = use PATH)
 	Port       int    `json:"port"`        // HTTP server port
@@ -42,19 +40,16 @@ type SystemConfig struct {
 	Password   string `json:"password"`    // Login password
 }
 
-// WebConfig represents station branding settings for the web interface.
 type WebConfig struct {
 	StationName string `json:"station_name"` // Station display name
 	ColorLight  string `json:"color_light"`  // Theme color for light mode (#RRGGBB)
 	ColorDark   string `json:"color_dark"`   // Theme color for dark mode (#RRGGBB)
 }
 
-// AudioConfig represents audio input device settings.
 type AudioConfig struct {
 	Input string `json:"input"` // Audio input device identifier
 }
 
-// SilenceDetectionConfig represents silence detection thresholds and timing.
 type SilenceDetectionConfig struct {
 	ThresholdDB float64 `json:"threshold_db"` // Silence threshold in dB
 	DurationMs  int64   `json:"duration_ms"`  // Duration below threshold before silence alert
@@ -62,17 +57,10 @@ type SilenceDetectionConfig struct {
 	PeakHoldMs  int64   `json:"peak_hold_ms"` // Duration to hold peak values in VU meter
 }
 
-// WebhookConfig represents webhook notification settings.
 type WebhookConfig struct {
 	URL string `json:"url"` // Webhook URL for silence alerts
 }
 
-// LogConfig represents log file notification settings.
-type LogConfig struct {
-	Path string `json:"path"` // Log file path for silence events
-}
-
-// EmailConfig represents Microsoft Graph email notification settings.
 type EmailConfig struct {
 	TenantID     string `json:"tenant_id"`     // Azure AD tenant ID
 	ClientID     string `json:"client_id"`     // App registration client ID
@@ -81,27 +69,23 @@ type EmailConfig struct {
 	Recipients   string `json:"recipients"`    // Comma-separated recipient addresses
 }
 
-// NotificationsConfig represents all notification channel settings.
 type NotificationsConfig struct {
 	Webhook WebhookConfig      `json:"webhook"`          // Webhook settings
-	Log     LogConfig          `json:"log"`              // Log file settings
 	Email   EmailConfig        `json:"email"`            // Email settings
 	Zabbix  types.ZabbixConfig `json:"zabbix,omitempty"` // Zabbix settings
 }
 
-// StreamingConfig represents SRT streaming settings.
 type StreamingConfig struct {
 	Streams []types.Stream `json:"streams"` // SRT streaming destinations
 }
 
-// RecordingConfig represents recording destinations and settings.
 type RecordingConfig struct {
 	APIKey             string           `json:"api_key"`              // API key for recording control
 	MaxDurationMinutes int              `json:"max_duration_minutes"` // Max duration for on-demand recorders
 	Recorders          []types.Recorder `json:"recorders"`            // Recording destinations
 }
 
-// Config represents all application configuration and is safe for concurrent use.
+// Config is safe for concurrent use.
 type Config struct {
 	System           SystemConfig            `json:"system"`
 	Web              WebConfig               `json:"web"`
@@ -417,13 +401,6 @@ func (c *Config) GetFFmpegPath() string {
 	return c.System.FFmpegPath
 }
 
-// LogPath returns the configured log file path for notifications.
-func (c *Config) LogPath() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.Notifications.Log.Path
-}
-
 // GraphConfig returns a copy of the current Graph/Email configuration.
 func (c *Config) GraphConfig() types.GraphConfig {
 	c.mu.RLock()
@@ -483,7 +460,6 @@ type Snapshot struct {
 
 	// Notifications
 	WebhookURL string
-	LogPath    string
 
 	// Zabbix
 	ZabbixServer string
@@ -538,7 +514,6 @@ func (c *Config) Snapshot() Snapshot {
 
 		// Notifications
 		WebhookURL: c.Notifications.Webhook.URL,
-		LogPath:    c.Notifications.Log.Path,
 
 		// Zabbix
 		ZabbixServer: c.Notifications.Zabbix.Server,
@@ -574,11 +549,6 @@ func (s *Snapshot) HasGraph() bool {
 		s.GraphFromAddress != "" && s.GraphRecipients != ""
 }
 
-// HasLogPath reports whether a log path is configured.
-func (s *Snapshot) HasLogPath() bool {
-	return s.LogPath != ""
-}
-
 // HasZabbix reports whether Zabbix settings are configured.
 func (s *Snapshot) HasZabbix() bool {
 	return s.ZabbixServer != "" && s.ZabbixHost != "" && s.ZabbixKey != ""
@@ -587,7 +557,6 @@ func (s *Snapshot) HasZabbix() bool {
 // --- Atomic Settings Update ---
 
 // SettingsUpdate contains all settings for atomic update.
-// Used both for API requests (with json tags) and internal updates.
 type SettingsUpdate struct {
 	AudioInput               string  `json:"audio_input"`
 	SilenceThreshold         float64 `json:"silence_threshold"`
@@ -596,7 +565,6 @@ type SettingsUpdate struct {
 	SilenceDumpEnabled       bool    `json:"silence_dump_enabled"`
 	SilenceDumpRetentionDays int     `json:"silence_dump_retention_days"`
 	WebhookURL               string  `json:"webhook_url"`
-	LogPath                  string  `json:"log_path"`
 	ZabbixServer             string  `json:"zabbix_server"`
 	ZabbixPort               int     `json:"zabbix_port"`
 	ZabbixHost               string  `json:"zabbix_host"`
@@ -632,13 +600,6 @@ func (s *SettingsUpdate) Validate() []string {
 	if s.WebhookURL != "" {
 		if _, err := url.ParseRequestURI(s.WebhookURL); err != nil {
 			errs = append(errs, "webhook_url: invalid URL format")
-		}
-	}
-
-	// Log path security
-	if s.LogPath != "" {
-		if err := util.ValidatePath("log_path", s.LogPath); err != nil {
-			errs = append(errs, err.Error())
 		}
 	}
 
@@ -681,7 +642,6 @@ func (c *Config) ApplySettings(s *SettingsUpdate) error {
 
 	// Notifications
 	c.Notifications.Webhook.URL = s.WebhookURL
-	c.Notifications.Log.Path = s.LogPath
 	c.Notifications.Zabbix.Server = s.ZabbixServer
 	c.Notifications.Zabbix.Port = s.ZabbixPort
 	c.Notifications.Zabbix.Host = s.ZabbixHost

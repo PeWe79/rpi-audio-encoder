@@ -10,17 +10,17 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/oszuidwest/zwfm-encoder/internal/eventlog"
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 )
 
-// uploadRequest is a request to upload a file to S3.
+// uploadRequest represents a file to be uploaded to S3.
 type uploadRequest struct {
 	localPath string
 	s3Key     string
 	fileSize  int64
 }
 
-// queueForUpload adds a completed file to the upload queue.
 func (r *GenericRecorder) queueForUpload(filePath string) {
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -49,12 +49,27 @@ func (r *GenericRecorder) queueForUpload(filePath string) {
 		fileSize:  info.Size(),
 	}:
 		slog.Info("queued file for upload", "id", r.id, "file", filepath.Base(filePath))
+		r.logUploadEventLocked(eventlog.UploadQueued, filepath.Base(filePath), s3Key, "")
 	default:
 		slog.Warn("upload queue full", "id", r.id)
 	}
 }
 
-// uploadWorker processes the upload queue.
+func (r *GenericRecorder) logUploadEventLocked(eventType eventlog.EventType, filename, s3Key, errMsg string) {
+	if r.eventLogger == nil {
+		return
+	}
+	r.mu.RLock()
+	p := r.captureLogParamsLocked()
+	r.mu.RUnlock()
+
+	p.Filename = filename
+	p.S3Key = s3Key
+	p.Error = errMsg
+	r.logEvent(eventType, p)
+}
+
+// uploadWorker processes the upload queue, draining remaining items on shutdown.
 func (r *GenericRecorder) uploadWorker() {
 	defer r.uploadWg.Done()
 
@@ -76,7 +91,7 @@ func (r *GenericRecorder) uploadWorker() {
 	}
 }
 
-// uploadFile uploads a single file to S3.
+// uploadFile uploads to S3 and deletes temp files in S3-only mode.
 func (r *GenericRecorder) uploadFile(req uploadRequest) {
 	ctx, cancel := context.WithTimeoutCause(
 		context.Background(),
@@ -123,6 +138,7 @@ func (r *GenericRecorder) uploadFile(req uploadRequest) {
 
 	if err != nil {
 		slog.Error("upload failed", "id", r.id, "s3_key", req.s3Key, "error", err)
+		r.logUploadEventLocked(eventlog.UploadFailed, filepath.Base(req.localPath), req.s3Key, err.Error())
 		return
 	}
 
@@ -131,6 +147,7 @@ func (r *GenericRecorder) uploadFile(req uploadRequest) {
 	r.mu.RUnlock()
 
 	slog.Info("upload completed", "id", r.id, "s3_key", req.s3Key)
+	r.logUploadEventLocked(eventlog.UploadCompleted, filepath.Base(req.localPath), req.s3Key, "")
 
 	// Handle local file based on storage mode
 	if storageMode == types.StorageS3 {
