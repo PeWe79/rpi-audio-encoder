@@ -73,7 +73,7 @@ func (m *Manager) cleanupLocalFiles(recorder *GenericRecorder) {
 		return
 	}
 
-	cutoff := util.RetentionCutoff(cfg.RetentionDays)
+	cutoff := util.RetentionCutoff(cfg.RetentionDays, time.Now())
 	safeName := sanitizeFilename(cfg.Name)
 
 	entries, err := os.ReadDir(cfg.LocalPath)
@@ -142,7 +142,7 @@ func (m *Manager) cleanupS3Files(recorder *GenericRecorder) {
 		return
 	}
 
-	cutoff := util.RetentionCutoff(cfg.RetentionDays)
+	cutoff := util.RetentionCutoff(cfg.RetentionDays, time.Now())
 	safeName := sanitizeFilename(cfg.Name)
 	prefix := "recordings/" + safeName + "/"
 

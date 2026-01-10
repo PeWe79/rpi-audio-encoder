@@ -26,8 +26,7 @@ var DatePattern = regexp.MustCompile(`(\d{4}-\d{2}-\d{2})`)
 //	Cutoff = Jan 4 00:00:00
 //	Files from Jan 4-10 → kept (7 days)
 //	Files from Jan 3 or earlier → deleted
-func RetentionCutoff(days int) time.Time {
-	now := time.Now()
+func RetentionCutoff(days int, now time.Time) time.Time {
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	return today.AddDate(0, 0, -days+1)
 }

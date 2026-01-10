@@ -174,7 +174,7 @@ func (m *Manager) runCleanup() {
 		return
 	}
 
-	cutoff := util.RetentionCutoff(retentionDays)
+	cutoff := util.RetentionCutoff(retentionDays, time.Now())
 	var deleted int
 
 	for _, entry := range entries {
