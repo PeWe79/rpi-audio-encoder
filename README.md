@@ -139,6 +139,37 @@ The encoder logs all stream, silence, and recording events to a JSON Lines file 
 
 See [docs/events.md](docs/events.md) for the complete event reference.
 
+## Health Endpoint
+
+`GET /health` provides a public endpoint for monitoring tools (Kubernetes probes, load balancers, Prometheus, etc.).
+
+**Healthy (200 OK)** requires both:
+- Encoder state is `running` (audio capture active)
+- FFmpeg binary is available on the system
+
+**Unhealthy (503 Service Unavailable)** when either:
+- Encoder state is `stopped`, `starting`, or `stopping`
+- FFmpeg binary is not found
+
+Note: Stream connection failures, silence detection, and recorder errors do **not** affect health status. These are reported in the response body for informational purposes only.
+
+Response example:
+
+```json
+{
+  "status": "healthy",
+  "encoder_state": "running",
+  "stream_count": 2,
+  "streams_stable": 2,
+  "recorder_count": 1,
+  "recorders_running": 1,
+  "uptime_seconds": 9252,
+  "silence_detected": false
+}
+```
+
+No authentication required.
+
 ## Architecture
 
 ```mermaid

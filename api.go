@@ -611,6 +611,72 @@ func (s *Server) handleAPIRegenerateKey(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, map[string]string{"api_key": newKey})
 }
 
+// HealthResponse is the response body for the health endpoint.
+type HealthResponse struct {
+	Status           string `json:"status"`
+	EncoderState     string `json:"encoder_state"`
+	StreamCount      int    `json:"stream_count"`
+	StreamsStable    int    `json:"streams_stable"`
+	RecorderCount    int    `json:"recorder_count"`
+	RecordersRunning int    `json:"recorders_running"`
+	UptimeSeconds    int64  `json:"uptime_seconds"`
+	SilenceDetected  bool   `json:"silence_detected"`
+}
+
+// handleHealth returns the health status of the encoder.
+// GET /health
+// Returns 200 OK if healthy, 503 Service Unavailable if unhealthy.
+// Health is defined as: encoder running AND FFmpeg available.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	cfg := s.config.Snapshot()
+	encoderStatus := s.encoder.Status()
+	streamStatuses := s.encoder.AllStreamStatuses(cfg.Streams)
+	recorderStatuses := s.encoder.AllRecorderStatuses()
+
+	streamsStable := countStableStreams(streamStatuses)
+	recordersRunning := countRunningRecorders(recorderStatuses)
+
+	isHealthy := s.ffmpegAvailable && encoderStatus.State == types.StateRunning
+
+	status := "healthy"
+	httpStatus := http.StatusOK
+	if !isHealthy {
+		status = "unhealthy"
+		httpStatus = http.StatusServiceUnavailable
+	}
+
+	s.writeJSON(w, httpStatus, HealthResponse{
+		Status:           status,
+		EncoderState:     string(encoderStatus.State),
+		StreamCount:      len(cfg.Streams),
+		StreamsStable:    streamsStable,
+		RecorderCount:    len(cfg.Recorders),
+		RecordersRunning: recordersRunning,
+		UptimeSeconds:    encoderStatus.UptimeSeconds,
+		SilenceDetected:  s.encoder.AudioLevels().SilenceLevel == audio.SilenceLevelActive,
+	})
+}
+
+func countStableStreams(statuses map[string]types.ProcessStatus) int {
+	count := 0
+	for _, status := range statuses {
+		if status.Stable {
+			count++
+		}
+	}
+	return count
+}
+
+func countRunningRecorders(statuses map[string]types.ProcessStatus) int {
+	count := 0
+	for _, status := range statuses {
+		if status.State == types.ProcessRunning {
+			count++
+		}
+	}
+	return count
+}
+
 // handleAPIEvents returns events from the event log.
 func (s *Server) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
 	emptyResponse := map[string]any{
