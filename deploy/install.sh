@@ -87,7 +87,8 @@ if [ -f "$CONFIG_FILE" ] || [ -f "${INSTALL_DIR}/encoder" ]; then
     echo -e "Found configuration at: ${BOLD}${CONFIG_FILE}${NC}"
   fi
   if [ -f "${INSTALL_DIR}/encoder" ]; then
-    CURRENT_VERSION=$("${INSTALL_DIR}/encoder" -version 2>/dev/null || echo "unknown")
+    CURRENT_VERSION=$("${INSTALL_DIR}/encoder" -version 2>&1 | sed -n 's/.*version=\([^ ]*\).*/\1/p')
+    CURRENT_VERSION="${CURRENT_VERSION:-unknown}"
     echo -e "Found encoder binary:   ${BOLD}${INSTALL_DIR}/encoder${NC} (${CURRENT_VERSION})"
   fi
 
