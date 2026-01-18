@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/url"
@@ -17,6 +18,15 @@ import (
 
 	"github.com/oszuidwest/zwfm-encoder/internal/types"
 	"github.com/oszuidwest/zwfm-encoder/internal/util"
+)
+
+// Sentinel errors for configuration operations.
+var (
+	// ErrStreamNotFound is returned when a stream ID does not exist in config.
+	ErrStreamNotFound = errors.New("stream not found")
+
+	// ErrRecorderNotFound is returned when a recorder ID does not exist in config.
+	ErrRecorderNotFound = errors.New("recorder not found")
 )
 
 const (
@@ -280,7 +290,7 @@ func (c *Config) RemoveStream(id string) error {
 
 	i := c.findStreamIndex(id)
 	if i == -1 {
-		return fmt.Errorf("stream not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrStreamNotFound, id)
 	}
 
 	c.Streaming.Streams = slices.Delete(c.Streaming.Streams, i, i+1)
@@ -298,7 +308,7 @@ func (c *Config) UpdateStream(stream *types.Stream) error {
 
 	i := c.findStreamIndex(stream.ID)
 	if i == -1 {
-		return fmt.Errorf("stream not found: %s", stream.ID)
+		return fmt.Errorf("%w: %s", ErrStreamNotFound, stream.ID)
 	}
 
 	c.Streaming.Streams[i] = *stream
@@ -360,7 +370,7 @@ func (c *Config) RemoveRecorder(id string) error {
 
 	i := c.findRecorderIndex(id)
 	if i == -1 {
-		return fmt.Errorf("recorder not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrRecorderNotFound, id)
 	}
 
 	c.Recording.Recorders = slices.Delete(c.Recording.Recorders, i, i+1)
@@ -378,7 +388,7 @@ func (c *Config) UpdateRecorder(recorder *types.Recorder) error {
 
 	i := c.findRecorderIndex(recorder.ID)
 	if i == -1 {
-		return fmt.Errorf("recorder not found: %s", recorder.ID)
+		return fmt.Errorf("%w: %s", ErrRecorderNotFound, recorder.ID)
 	}
 
 	c.Recording.Recorders[i] = *recorder

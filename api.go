@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime"
@@ -36,6 +37,14 @@ func (s *Server) writeMessage(w http.ResponseWriter, message string) {
 
 func (s *Server) writeNoContent(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) writeConfigError(w http.ResponseWriter, err error) {
+	if errors.Is(err, config.ErrStreamNotFound) || errors.Is(err, config.ErrRecorderNotFound) {
+		s.writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	s.writeError(w, http.StatusInternalServerError, err.Error())
 }
 
 func (s *Server) readJSON(r *http.Request, v any) error {
@@ -213,8 +222,15 @@ func (s *Server) handleCreateStream(w http.ResponseWriter, r *http.Request) {
 		MaxRetries: req.MaxRetries,
 	}
 
-	if err := s.config.AddStream(stream); err != nil {
+	// Validate first - client error
+	if err := stream.Validate(); err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Persistence failures are server errors
+	if err := s.config.AddStream(stream); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -256,8 +272,15 @@ func (s *Server) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:  existing.CreatedAt,
 	}
 
-	if err := s.config.UpdateStream(updated); err != nil {
+	// Validate first - client error
+	if err := updated.Validate(); err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Persistence failures are server errors (not-found can happen on concurrent delete)
+	if err := s.config.UpdateStream(updated); err != nil {
+		s.writeConfigError(w, err)
 		return
 	}
 
@@ -293,7 +316,7 @@ func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.config.RemoveStream(id); err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeConfigError(w, err)
 		return
 	}
 
@@ -354,8 +377,15 @@ func (s *Server) handleCreateRecorder(w http.ResponseWriter, r *http.Request) {
 		RetentionDays:     req.RetentionDays,
 	}
 
-	if err := s.encoder.AddRecorder(recorder); err != nil {
+	// Validate first - client error
+	if err := recorder.Validate(); err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Persistence/manager failures are server errors
+	if err := s.encoder.AddRecorder(recorder); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -395,8 +425,15 @@ func (s *Server) handleUpdateRecorder(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:         existing.CreatedAt,
 	}
 
-	if err := s.encoder.UpdateRecorder(updated); err != nil {
+	// Validate first - client error
+	if err := updated.Validate(); err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Persistence/manager failures are server errors (not-found can happen on concurrent delete)
+	if err := s.encoder.UpdateRecorder(updated); err != nil {
+		s.writeConfigError(w, err)
 		return
 	}
 
@@ -413,7 +450,7 @@ func (s *Server) handleDeleteRecorder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.encoder.RemoveRecorder(id); err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeConfigError(w, err)
 		return
 	}
 

@@ -42,10 +42,11 @@ type GenericRecorder struct {
 	s3ConfigKey string // Config key used to create cached client
 
 	// Upload queue
-	uploadQueue  chan uploadRequest
-	uploadWg     sync.WaitGroup
-	uploadStopCh chan struct{}
-	stopOnce     sync.Once // Prevents double-close of uploadStopCh
+	uploadQueue         chan uploadRequest
+	uploadWg            sync.WaitGroup
+	uploadStopCh        chan struct{}
+	stopOnce            sync.Once // Prevents double-close of uploadStopCh
+	uploadWorkerRunning bool      // Guards against starting multiple upload workers
 
 	// Retry queue for failed uploads (protected by mu)
 	retryQueue []pendingUpload
@@ -185,8 +186,11 @@ func (r *GenericRecorder) startAsync() {
 	}
 
 	// Start upload worker (after encoder to prevent goroutine leak on failure)
-	r.uploadWg.Add(1)
-	go r.uploadWorker()
+	if !r.uploadWorkerRunning {
+		r.uploadWorkerRunning = true
+		r.uploadWg.Add(1)
+		go r.uploadWorker()
+	}
 
 	// Schedule based on rotation mode
 	if r.config.RotationMode == types.RotationHourly {
@@ -241,23 +245,15 @@ func (r *GenericRecorder) logEvent(eventType eventlog.EventType, p *eventlog.Rec
 func (r *GenericRecorder) Stop() error {
 	r.mu.Lock()
 
+	// Already stopped or stopping
 	if r.state == types.ProcessStopped || r.state == types.ProcessStopping {
 		r.mu.Unlock()
 		return nil
 	}
 
-	// If in error or starting state, just reset to stopped
-	if r.state == types.ProcessError || r.state == types.ProcessStarting {
-		r.state = types.ProcessStopped
-		r.lastError = ""
-		r.mu.Unlock()
-		return nil
-	}
-
-	// ProcessRunning or ProcessRotating - proceed with full stop sequence
 	r.state = types.ProcessStopping
 
-	// Stop timers
+	// Always stop timers (may be running even after write error)
 	if r.rotationTimer != nil {
 		r.rotationTimer.Stop()
 		r.rotationTimer = nil
@@ -267,12 +263,16 @@ func (r *GenericRecorder) Stop() error {
 		r.durationTimer = nil
 	}
 
+	// Capture result to determine if we need encoder cleanup
+	result := r.result
 	r.mu.Unlock()
 
-	// Stop encoder and finalize file
-	r.stopEncoderAndUpload()
+	// Stop encoder and finalize file (only if encoder is active)
+	if result != nil {
+		r.stopEncoderAndUpload()
+	}
 
-	// Stop upload worker - use Once to prevent double-close panic
+	// Always stop upload worker - may be running even after write error
 	r.stopOnce.Do(func() {
 		close(r.uploadStopCh)
 	})
@@ -280,9 +280,11 @@ func (r *GenericRecorder) Stop() error {
 
 	r.mu.Lock()
 	r.state = types.ProcessStopped
+	r.lastError = ""
 	r.uploadStopCh = make(chan struct{})          // Reset for next start
 	r.uploadQueue = make(chan uploadRequest, 100) // Reset for next start
 	r.stopOnce = sync.Once{}                      // Reset Once for next start
+	r.uploadWorkerRunning = false                 // Reset for next start
 
 	// Clear retry queue on shutdown (files remain in temp dir)
 	if len(r.retryQueue) > 0 {
@@ -323,13 +325,70 @@ func (r *GenericRecorder) WriteAudio(pcm []byte) error {
 			return nil
 		}
 
+		// Capture values and clear to prevent further writes and double cleanup
 		r.mu.Lock()
+		r.state = types.ProcessError
 		r.lastError = err.Error()
+		capturedResult := r.result
+		capturedFile := r.currentFile
+		r.result = nil
+		r.currentFile = ""
 		r.mu.Unlock()
+
+		// Trigger async cleanup to finalize/upload the current recording
+		go r.cleanupAfterWriteError(capturedResult, capturedFile)
+
 		return err
 	}
 
 	return nil
+}
+
+// cleanupAfterWriteError handles cleanup when a write error occurs.
+// It closes FFmpeg gracefully and uploads the file directly.
+func (r *GenericRecorder) cleanupAfterWriteError(result *ffmpeg.StartResult, currentFile string) {
+	if result == nil {
+		return
+	}
+
+	slog.Warn("recorder write error, cleaning up", "id", r.id)
+
+	// Close stdin - signals FFmpeg that input is done
+	result.CloseStdin()
+
+	// Wait for FFmpeg to finish with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- result.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			r.mu.Lock()
+			errMsg := util.ExtractLastError(result.Stderr())
+			if errMsg != "" {
+				r.lastError = errMsg
+			}
+			r.mu.Unlock()
+		}
+	case <-time.After(10 * time.Second):
+		slog.Warn("recorder ffmpeg did not stop in time after write error, sending signal", "id", r.id)
+		_ = result.Signal()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			slog.Error("recorder ffmpeg force killed after write error", "id", r.id)
+			_ = result.Kill()
+			<-done
+		}
+	}
+
+	// Upload directly - bypasses queue to avoid race with concurrent Stop()
+	if currentFile != "" {
+		r.uploadDirectly(currentFile)
+	}
 }
 
 func (r *GenericRecorder) Status() types.ProcessStatus {
@@ -571,10 +630,6 @@ func (r *GenericRecorder) getFileExtension() string {
 
 func (r *GenericRecorder) getContentType() string {
 	switch r.config.Codec {
-	case types.CodecMP2:
-		return "audio/mpeg"
-	case types.CodecMP3:
-		return "audio/mpeg"
 	case types.CodecOGG:
 		return "audio/ogg"
 	case types.CodecWAV:
