@@ -45,12 +45,18 @@ func outputDirForPort(port int) string {
 
 // EncodeResult contains the result of encoding a silence dump.
 type EncodeResult struct {
-	FilePath  string        // Full path to the MP3 file
-	Filename  string        // Just the filename
-	FileSize  int64         // Size in bytes
-	Duration  time.Duration // Total silence duration
-	DumpStart time.Time     // When silence started
-	Error     error         // nil if successful
+	// FilePath is the full filesystem path to the encoded MP3 file.
+	FilePath string
+	// Filename is the base name of the MP3 file (e.g., "2024-01-15_14-32-05.mp3").
+	Filename string
+	// FileSize is the encoded MP3 file size in bytes.
+	FileSize int64
+	// Duration is how long the silence event lasted.
+	Duration time.Duration
+	// DumpStart is when the silence event began.
+	DumpStart time.Time
+	// Error is non-nil if encoding failed.
+	Error error
 }
 
 // DumpCallback is called when a dump is ready.
@@ -62,14 +68,15 @@ type Capturer struct {
 
 	// Ring buffer for continuous audio capture.
 	buffer       []byte
-	writePos     int   // Current write position in buffer
-	totalWritten int64 // Total bytes written (for position tracking)
+	writePos     int   // current write position in buffer
+	totalWritten int64 // total bytes written (for position tracking)
 
 	// Silence event tracking (positions, not copies).
-	silenceStartPos int64     // Byte position when silence started
-	silenceEndPos   int64     // Byte position when recovery started
-	silenceStart    time.Time // Time when silence started
-	capturing       bool      // True if we're waiting for recovery + 15s
+	silenceStartPos int64     // byte position when silence started
+	silenceEndPos   int64     // byte position when recovery started
+	silenceStart    time.Time // time when silence started
+	// capturing reports whether we're waiting for recovery audio.
+	capturing bool
 
 	// Saved pre-silence audio snapshot. Captured immediately on silence start
 	// to prevent data loss during long silences that exceed ring buffer capacity.
@@ -93,7 +100,7 @@ func NewCapturer(ffmpegPath, outputDir string, onDumpReady DumpCallback) *Captur
 	}
 }
 
-// SetEnabled controls whether dump capture is active.
+// SetEnabled sets whether dump capture is active.
 func (c *Capturer) SetEnabled(enabled bool) {
 	c.mu.Lock()
 	c.enabled = enabled && c.ffmpegPath != ""

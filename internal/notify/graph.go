@@ -132,9 +132,12 @@ type graphAttachment struct {
 
 // EmailAttachment represents an email attachment.
 type EmailAttachment struct {
-	Filename    string
+	// Filename is the attachment file name shown to the recipient.
+	Filename string
+	// ContentType is the MIME type of the attachment (e.g., "audio/mpeg").
 	ContentType string
-	Data        []byte
+	// Data is the raw attachment content to be base64-encoded.
+	Data []byte
 }
 
 // SendMail sends an email to the specified recipients.
